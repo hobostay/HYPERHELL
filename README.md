@@ -17,7 +17,9 @@ In this demo level, you will meet the Bargainer, who offers you an exchange that
 ## Why HYPERHELL
 
 This game started as a question: can we understand 4-dimensional worlds intuitively?
+
 After some experimentation with rendering techniques for 4D worlds, I explored a new way to render 4D: through a 4D Eye, i.e. a camera with a 3D sensor.
+
 Because I think we learn best by interacting, I then settled on creating a game that would use this new sensor rendering (which became the "Unblink" mechanic).
 
 ## Gameplay
