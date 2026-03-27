@@ -1,0 +1,2451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hypercamera</title>
+    <link rel="icon" type="image/x-icon" href="favicon.ico">
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+        }
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 14px;
+            z-index: 100;
+        }
+        #main-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        #projection-container {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            z-index: 50;
+        }
+        #additional-projection-container {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            z-index: 50;
+        }
+        #physics-debug-container {
+            position: absolute;
+            top: 10px;
+            right: 220px;
+            display: none;
+            flex-direction: column;
+            gap: 10px;
+            z-index: 50;
+        }
+        .projection-view {
+            background: rgba(0, 0, 0, 0.8);
+            border: 2px solid #444;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        .projection-label {
+            color: white;
+            text-align: center;
+            padding: 5px;
+            background: rgba(0, 0, 0, 0.9);
+            font-size: 12px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        You are looking at the 3D sensor of a 4D <a href="../funderstanding/4d_camera.html" style="color:inherit;">hypercamera</a>.<br>
+        <div id="help-controls" style="color:rgb(104, 113, 167);">
+        WASD: Move hypercamera forwards, sideways<br>
+        Q/E: Move hypercamera in ana, kata directions<br>
+        IJKL: Rotate hypercamera up/down, left/right<br>
+        U/O: Rotate hypercamera in wx plane<br>
+        Y/P: Rotate hypercamera in wy plane<br>
+        0-2: Rotate hypercamera towards objects<br>
+        Mouse drag: Rotate sensor view<br>
+        Mouse wheel: Zoom<br>
+        v: Show additional views<br>
+        g: Toggle gizmo mode<br>
+        x: Toggle voxel rasterization<br>
+        Click: Select vertex<br>
+        Selected: <span id="selected">None</span>
+        </div>
+        <div id="help-key" style="color:rgb(104, 113, 167);">
+        h: Show/hide controls
+        </div>
+        <span id="mission-info"></span>
+    </div>
+    <!-- Add a floating element in the middle of the page, that is usally invisible but can contain warnings -->
+    <div id="warning-div" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:200;"> <!-- color:rgb(0, 235, 235);font-size:48px;font-weight:bold;">  --> <!-- display:none;"> -->
+        <span id="title-span" style="color:rgb(0, 235, 235);font-size:48px;font-weight:bold;">
+        HYPERCAMERA
+        </span>
+        <span id="warning-camera-inverted" style="color:rgb(79, 123, 136);font-size:24px;font-weight:bold;"></span>
+        <span id="warning-physics-paused" style="color:rgb(79, 123, 136);font-size:24px;font-weight:bold;"></span>
+        <span id="warning-object-collected" style="color:rgb(75, 209, 71);font-size:24px;font-weight:bold;"></span>
+    </div>
+    <div id="main-canvas"></div>
+    <div id="projection-container">
+        <div class="projection-view">
+            <div class="projection-label">XZ Projection (Side View)</div>
+            <div id="xz-canvas"></div>
+        </div>
+        <div class="projection-view">
+            <div class="projection-label">YZ Projection (Front View)</div>
+            <div id="yz-canvas"></div>
+        </div>
+        <div class="projection-view">
+            <div class="projection-label">WZ Projection (AnaKata View)</div>
+            <div id="wz-canvas"></div>
+        </div>
+    </div>
+    <div id="additional-projection-container">
+        <div class="projection-view">
+            <div class="projection-label">YW Projection (Weird View)</div>
+            <div id="yw-canvas"></div>
+        </div>
+        <div class="projection-view">
+            <div class="projection-label">XW Projection (Strange View)</div>
+            <div id="xw-canvas"></div>
+        </div>
+        <div class="projection-view">
+            <div class="projection-label">XY Projection (Top View)</div>
+            <div id="xy-canvas"></div>
+        </div>
+    </div>
+    <div id="physics-debug-container">
+        <div class="projection-view">
+            <div class="projection-label">Physics</div>
+            <div id="physics-debug-text" style="color:#444"></div>
+        </div>
+
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+
+        // 4D transform class prototype (just implement init, and origin() for now)
+        class Vector4D {
+            constructor(x, y, z, w) {
+                this.x = x;
+                this.y = y;
+                this.z = z;
+                this.w = w;
+            }
+            add(v) {
+                return new Vector4D(this.x + v.x, this.y + v.y, this.z + v.z, this.w + v.w);
+            }
+            subtract(v) {
+                return new Vector4D(this.x - v.x, this.y - v.y, this.z - v.z, this.w - v.w);
+            }
+            normalize() {
+                let mag = Math.sqrt(this.x * this.x + this.y * this.y + this.z * this.z + this.w * this.w);
+                if (mag === 0) return new Vector4D(0, 0, 0, 0);
+                return new Vector4D(this.x / mag, this.y / mag, this.z / mag, this.w / mag);
+            }
+            magnitude() {
+                return Math.sqrt(this.x * this.x + this.y * this.y + this.z * this.z + this.w * this.w);
+            }
+            dot(v) {
+                return this.x * v.x + this.y * v.y + this.z * v.z + this.w * v.w;
+            }
+            multiply_by_scalar(s) {
+                return new Vector4D(this.x * s, this.y * s, this.z * s, this.w * s);
+            }
+        }
+        class Transform4D {
+            // constructor() {
+            //     this.matrix = [
+            //         [1, 0, 0, 0, 0],
+            //         [0, 1, 0, 0, 0],
+            //         [0, 0, 1, 0, 0],
+            //         [0, 0, 0, 1, 0],
+            //         [0, 0, 0, 0, 1]
+            //     ];
+            // }
+            constructor(matrix) {
+                this.matrix = matrix;
+            }
+
+            origin() {
+                return new Vector4D(this.matrix[0][4], this.matrix[1][4], this.matrix[2][4], this.matrix[3][4]);
+            }
+
+            // transform_point(v: Vector4D): Vector4D
+            transform_point(v) {
+                let x = this.matrix[0][0] * v.x + this.matrix[0][1] * v.y + this.matrix[0][2] * v.z + this.matrix[0][3] * v.w + this.matrix[0][4];
+                let y = this.matrix[1][0] * v.x + this.matrix[1][1] * v.y + this.matrix[1][2] * v.z + this.matrix[1][3] * v.w + this.matrix[1][4];
+                let z = this.matrix[2][0] * v.x + this.matrix[2][1] * v.y + this.matrix[2][2] * v.z + this.matrix[2][3] * v.w + this.matrix[2][4];
+                let w = this.matrix[3][0] * v.x + this.matrix[3][1] * v.y + this.matrix[3][2] * v.z + this.matrix[3][3] * v.w + this.matrix[3][4];
+                return new Vector4D(x, y, z, w);
+            }
+
+            transform_vector(v) {
+                let x = this.matrix[0][0] * v.x + this.matrix[0][1] * v.y + this.matrix[0][2] * v.z + this.matrix[0][3] * v.w;
+                let y = this.matrix[1][0] * v.x + this.matrix[1][1] * v.y + this.matrix[1][2] * v.z + this.matrix[1][3] * v.w;
+                let z = this.matrix[2][0] * v.x + this.matrix[2][1] * v.y + this.matrix[2][2] * v.z + this.matrix[2][3] * v.w;
+                let w = this.matrix[3][0] * v.x + this.matrix[3][1] * v.y + this.matrix[3][2] * v.z + this.matrix[3][3] * v.w;
+                return new Vector4D(x, y, z, w);
+            }
+
+            transform_transform(T) {
+                // matrix multiplication: this.matrix * T.matrix
+                // inC_T_B * inB_T_A  -> inC_T_A
+                // inC_T_B.transform_transform(inB_T_A) -> inC_T_A
+                let Tl = this.matrix;
+                let Tr = T.matrix;
+                let Tn = [
+                    [
+                        Tl[0][0] * Tr[0][0] + Tl[0][1] * Tr[1][0] + Tl[0][2] * Tr[2][0] + Tl[0][3] * Tr[3][0],
+                        Tl[0][0] * Tr[0][1] + Tl[0][1] * Tr[1][1] + Tl[0][2] * Tr[2][1] + Tl[0][3] * Tr[3][1],
+                        Tl[0][0] * Tr[0][2] + Tl[0][1] * Tr[1][2] + Tl[0][2] * Tr[2][2] + Tl[0][3] * Tr[3][2],
+                        Tl[0][0] * Tr[0][3] + Tl[0][1] * Tr[1][3] + Tl[0][2] * Tr[2][3] + Tl[0][3] * Tr[3][3],
+                        Tl[0][0] * Tr[0][4] + Tl[0][1] * Tr[1][4] + Tl[0][2] * Tr[2][4] + Tl[0][3] * Tr[3][4] + Tl[0][4]
+                    ],
+                    [
+                        Tl[1][0] * Tr[0][0] + Tl[1][1] * Tr[1][0] + Tl[1][2] * Tr[2][0] + Tl[1][3] * Tr[3][0],
+                        Tl[1][0] * Tr[0][1] + Tl[1][1] * Tr[1][1] + Tl[1][2] * Tr[2][1] + Tl[1][3] * Tr[3][1],
+                        Tl[1][0] * Tr[0][2] + Tl[1][1] * Tr[1][2] + Tl[1][2] * Tr[2][2] + Tl[1][3] * Tr[3][2],
+                        Tl[1][0] * Tr[0][3] + Tl[1][1] * Tr[1][3] + Tl[1][2] * Tr[2][3] + Tl[1][3] * Tr[3][3],
+                        Tl[1][0] * Tr[0][4] + Tl[1][1] * Tr[1][4] + Tl[1][2] * Tr[2][4] + Tl[1][3] * Tr[3][4] + Tl[1][4]
+                    ],
+                    [
+                        Tl[2][0] * Tr[0][0] + Tl[2][1] * Tr[1][0] + Tl[2][2] * Tr[2][0] + Tl[2][3] * Tr[3][0],
+                        Tl[2][0] * Tr[0][1] + Tl[2][1] * Tr[1][1] + Tl[2][2] * Tr[2][1] + Tl[2][3] * Tr[3][1],
+                        Tl[2][0] * Tr[0][2] + Tl[2][1] * Tr[1][2] + Tl[2][2] * Tr[2][2] + Tl[2][3] * Tr[3][2],
+                        Tl[2][0] * Tr[0][3] + Tl[2][1] * Tr[1][3] + Tl[2][2] * Tr[2][3] + Tl[2][3] * Tr[3][3],
+                        Tl[2][0] * Tr[0][4] + Tl[2][1] * Tr[1][4] + Tl[2][2] * Tr[2][4] + Tl[2][3] * Tr[3][4] + Tl[2][4]
+                    ],
+                    [
+                        Tl[3][0] * Tr[0][0] + Tl[3][1] * Tr[1][0] + Tl[3][2] * Tr[2][0] + Tl[3][3] * Tr[3][0],
+                        Tl[3][0] * Tr[0][1] + Tl[3][1] * Tr[1][1] + Tl[3][2] * Tr[2][1] + Tl[3][3] * Tr[3][1],
+                        Tl[3][0] * Tr[0][2] + Tl[3][1] * Tr[1][2] + Tl[3][2] * Tr[2][2] + Tl[3][3] * Tr[3][2],
+                        Tl[3][0] * Tr[0][3] + Tl[3][1] * Tr[1][3] + Tl[3][2] * Tr[2][3] + Tl[3][3] * Tr[3][3],
+                        Tl[3][0] * Tr[0][4] + Tl[3][1] * Tr[1][4] + Tl[3][2] * Tr[2][4] + Tl[3][3] * Tr[3][4] + Tl[3][4]
+                    ],
+                    [0, 0, 0, 0, 1]
+                ];
+                return new Transform4D(Tn);
+            }
+
+
+            translate_self_by_delta(dx, dy, dz, dw, is_in_own_frame) {
+                if (is_in_own_frame) {
+                    // translation in own frame
+                    let delta_in_parent = this.transform_vector(new Vector4D(dx, dy, dz, dw));
+                    this.matrix[0][4] += delta_in_parent.x;
+                    this.matrix[1][4] += delta_in_parent.y;
+                    this.matrix[2][4] += delta_in_parent.z;
+                    this.matrix[3][4] += delta_in_parent.w;
+                } else {
+                    // translation in parent frame
+                    this.matrix[0][4] += dx;
+                    this.matrix[1][4] += dy;
+                    this.matrix[2][4] += dz;
+                    this.matrix[3][4] += dw;
+                }
+            }
+
+            rotate_self_by_delta(plane_string, angle_rad, is_in_own_frame) {
+                // plane string: 'XY', 'XZ', 'XW', 'YZ', 'YW', 'ZW'
+                let c = Math.cos(angle_rad);
+                let s = Math.sin(angle_rad);
+                let R = [
+                    [1, 0, 0, 0,  0],
+                    [0, 1, 0, 0,  0],
+                    [0, 0, 1, 0,  0],
+                    [0, 0, 0, 1,  0],
+
+                    [0, 0, 0, 0,  1]
+                ];
+                switch (plane_string) {
+                    case 'XY':
+                        R[0][0] = c; R[0][1] = -s;
+                        R[1][0] = s; R[1][1] = c;
+                        break;
+                    case 'XZ':
+                        R[0][0] = c; R[0][2] = -s;
+                        R[2][0] = s; R[2][2] = c;
+                        break;
+                    case 'XW':
+                        R[0][0] = c; R[0][3] = -s;
+                        R[3][0] = s; R[3][3] = c;
+                        break;
+                    case 'YZ':
+                        R[1][1] = c; R[1][2] = -s;
+                        R[2][1] = s; R[2][2] = c;
+                        break;
+                    case 'YW':
+                        R[1][1] = c; R[1][3] = -s;
+                        R[3][1] = s; R[3][3] = c;
+                        break;
+                    case 'ZW':
+                        R[2][2] = c; R[2][3] = -s;
+                        R[3][2] = s; R[3][3] = c;
+                        break;
+                    default:
+                        console.error('Invalid plane string for rotation');
+                        return;
+                }
+                // let newT = this.transform_transform(new Transform4D(R));
+                // this.matrix = newT.matrix;
+                let Rdelta = new Transform4D(R);
+                if (is_in_own_frame) {
+                    // Apply rotation in own frame
+                    let newT = this.transform_transform(Rdelta);
+                    this.matrix = newT.matrix;
+                } else {
+                    // Apply rotation in parent frame
+                    let newT = Rdelta.transform_transform(this);
+                    // this.matrix = newT.matrix;
+                    // only copy the rotation part, keep the translation part
+                    // without rotation_only, we rotate around the parent origin instead of our own origin
+                    this.matrix = [
+                        [newT.matrix[0][0], newT.matrix[0][1], newT.matrix[0][2], newT.matrix[0][3], this.matrix[0][4]],
+                        [newT.matrix[1][0], newT.matrix[1][1], newT.matrix[1][2], newT.matrix[1][3], this.matrix[1][4]],
+                        [newT.matrix[2][0], newT.matrix[2][1], newT.matrix[2][2], newT.matrix[2][3], this.matrix[2][4]],
+                        [newT.matrix[3][0], newT.matrix[3][1], newT.matrix[3][2], newT.matrix[3][3], this.matrix[3][4]],
+                        [0, 0, 0, 0, 1]
+                    ];
+                }
+            }
+                    
+
+            
+
+            rotation_only() {
+                let R = [
+                    [this.matrix[0][0], this.matrix[0][1], this.matrix[0][2], this.matrix[0][3], 0],
+                    [this.matrix[1][0], this.matrix[1][1], this.matrix[1][2], this.matrix[1][3], 0],
+                    [this.matrix[2][0], this.matrix[2][1], this.matrix[2][2], this.matrix[2][3], 0],
+                    [this.matrix[3][0], this.matrix[3][1], this.matrix[3][2], this.matrix[3][3], 0],
+                    [0, 0, 0, 0, 1]
+                ];
+                return new Transform4D(R);
+            }
+
+            inverse() {
+                // separate rotation and translation
+                let R = [
+                    [this.matrix[0][0], this.matrix[0][1], this.matrix[0][2], this.matrix[0][3]],
+                    [this.matrix[1][0], this.matrix[1][1], this.matrix[1][2], this.matrix[1][3]],
+                    [this.matrix[2][0], this.matrix[2][1], this.matrix[2][2], this.matrix[2][3]],
+                    [this.matrix[3][0], this.matrix[3][1], this.matrix[3][2], this.matrix[3][3]]
+                ];
+                let t = [
+                    this.matrix[0][4],
+                    this.matrix[1][4],
+                    this.matrix[2][4],
+                    this.matrix[3][4]
+                ];
+                // transpose rotation
+                let R_inv = [
+                    [R[0][0], R[1][0], R[2][0], R[3][0]],
+                    [R[0][1], R[1][1], R[2][1], R[3][1]],
+                    [R[0][2], R[1][2], R[2][2], R[3][2]],
+                    [R[0][3], R[1][3], R[2][3], R[3][3]]
+                ];
+                // new translation
+                let t_inv = [
+                    -(R_inv[0][0] * t[0] + R_inv[0][1] * t[1] + R_inv[0][2] * t[2] + R_inv[0][3] * t[3]),
+                    -(R_inv[1][0] * t[0] + R_inv[1][1] * t[1] + R_inv[1][2] * t[2] + R_inv[1][3] * t[3]),
+                    -(R_inv[2][0] * t[0] + R_inv[2][1] * t[1] + R_inv[2][2] * t[2] + R_inv[2][3] * t[3]),
+                    -(R_inv[3][0] * t[0] + R_inv[3][1] * t[1] + R_inv[3][2] * t[2] + R_inv[3][3] * t[3])
+                ];
+                // combine into new matrix
+                let invMatrix = [
+                    [R_inv[0][0], R_inv[0][1], R_inv[0][2], R_inv[0][3], t_inv[0]],
+                    [R_inv[1][0], R_inv[1][1], R_inv[1][2], R_inv[1][3], t_inv[1]],
+                    [R_inv[2][0], R_inv[2][1], R_inv[2][2], R_inv[2][3], t_inv[2]],
+                    [R_inv[3][0], R_inv[3][1], R_inv[3][2], R_inv[3][3], t_inv[3]],
+                    [0, 0, 0, 0, 1]
+                ];
+                return new Transform4D(invMatrix);
+            }
+        }
+        class Hyperobject {
+            constructor(vertices_in_object, edges, tetras, color, simulate_physics, show_vertices, mass, pose, name) {
+                this.vertices_in_object = vertices_in_object; // in object frame
+                this.edges = edges;
+                this.tetras = tetras;
+                this.color = color;
+                this.simulate_physics = simulate_physics; // if true, object gets affected by physics
+                this.show_vertices = show_vertices;
+                this.mass = mass;
+                this.pose = pose; // Transform4D from object frame to world frame
+                this.name = name;
+                // variables
+                this.velocity_in_world = new Vector4D(0, 0, 0, 0);
+                this.rotational_velocity = {xy: 0, xz: 0, xw: 0, yz: 0, yw: 0, zw: 0};
+                // computed properties
+                this.update_vertices_in_world();
+            }
+
+            update_vertices_in_world() {
+                this.vertices_in_world = [];
+                for (let v of this.vertices_in_object) {
+                    let v_world = this.pose.transform_point(v);
+                    this.vertices_in_world.push(v_world);
+                }
+            }
+
+            get_com() {
+                return this.pose.origin();
+            }
+        }
+
+        // params
+        let SHOW_CONTROLS_HELP = true;
+        let SIMULATE_PHYSICS = true;
+        let DEBUG_PHYSICS = false;
+        let STEP_PHYSICS_ONCE = false;
+        let GIZMO_MODE = 1; // 0: none, 1: in world middle, 2: in sensor middle
+        let EXTRA_VIEWS = 1; // 0: none, 1: some ortho views, 2: all ortho views (slow)
+        let UVL_VOXEL_Z_RASTERIZATION_MODE = false;
+
+        // track variables
+        let user_has_interacted = false;
+        let physics_time_s = 0;
+        let accumulated_animation_time_s = 0;
+        let last_anim_end_time = performance.now();
+        // mission variables
+        let user_has_pushed_object = false;
+        let user_has_collected_hypercube = false;
+        let user_has_collected_hyperpyramid = false;
+        let hypercube_collection_time = 0;
+        let hyperpyramid_collection_time = 0;
+        let mission_complete_time = 0;
+        function update_mission() {
+            let mission_message = "Mission: Push a hyperobject";
+            // Decide what to display in the top left helper
+            if (user_has_pushed_object) {
+                mission_message = "Mission: Bring hyperobjects to the center (0/2)";
+                if (user_has_collected_hypercube || user_has_collected_hyperpyramid) {
+                    mission_message = "Mission: Bring hyperobject to the center (1/2)";
+                }
+                if (user_has_collected_hypercube && user_has_collected_hyperpyramid) {
+                    mission_message = "Mission complete.";
+                    if (mission_complete_time === 0) {
+                        mission_complete_time = (physics_time_s + accumulated_animation_time_s) / 2.0;
+                    }
+                }
+            }
+            // Udate mission-info span
+            document.getElementById('mission-info').innerHTML = `${mission_message}`;
+            // Display temporary popups
+            let now = physics_time_s;
+            const popup_duration = 5.0; // seconds
+            if (user_has_collected_hypercube) {
+                let hypercube_popup_opacity = Math.min(1.0, 1.0 - ((now - hypercube_collection_time) / popup_duration));
+                if (hypercube_popup_opacity > 0) {
+                    document.getElementById('warning-object-collected').innerHTML = `<span style="opacity:${hypercube_popup_opacity}">Collected hypercube!</span>`;
+                } else {
+                    document.getElementById('warning-object-collected').innerHTML = '';
+                }
+            } 
+            if (user_has_collected_hyperpyramid) {
+                let hyperpyramid_popup_opacity = Math.min(1.0, 1.0 - ((now - hyperpyramid_collection_time) / popup_duration));
+                if (hyperpyramid_popup_opacity > 0) {
+                    document.getElementById('warning-object-collected').innerHTML += `<br><span style="opacity:${hyperpyramid_popup_opacity}">Collected hyperpyramid!</span>`;
+                } else {
+                    document.getElementById('warning-object-collected').innerHTML = '';
+                }
+            }
+            if (mission_complete_time > 0) {
+                let mission_complete_popup_opacity = 1;
+                if (mission_complete_popup_opacity > 0) {
+                    document.getElementById('warning-object-collected').innerHTML += `<br><span style="opacity:${mission_complete_popup_opacity}">Mission complete!<br>Time: ${(mission_complete_time).toFixed(1)}s</span>`;
+                } else {
+                    document.getElementById('warning-object-collected').innerHTML = '';
+                }
+            }
+        }
+
+        function on_first_user_interaction() {
+            // HACK: remove spash at first interaction
+            if (!user_has_interacted) {
+                user_has_interacted = true;
+                // change text in warning div to nothing
+                document.getElementById('title-span').innerHTML = '';
+            }
+        }
+
+
+        // Hyperscene and Hypercam definition
+        // 4D Scene Bodies
+        let scene_bound = 10.0; // +10 means the scene goes from -10 to +10 in all dimensions
+        // gizmo
+        let gizmo_axes_vectors_in_world = [
+            new Vector4D(1.0, 0, 0, 0), // X axis
+            new Vector4D(0, 1.0, 0, 0), // Y axis
+            new Vector4D(0, 0, 1.0, 0), // Z axis
+            new Vector4D(0, 0, 0, 1.0)  // W axis
+        ];
+        const gizmo_length_in_world = 1.0;
+        let gizmo_z_in_world = floor_heightmap(0, 0, 0);
+        let gizmo_origin_in_world = new Vector4D(0, 0, gizmo_z_in_world, 0);
+        let gizmo_axes_in_world = [
+            [gizmo_origin_in_world, new Vector4D(gizmo_length_in_world, 0, gizmo_z_in_world, 0)], // X axis
+            [gizmo_origin_in_world, new Vector4D(0, gizmo_length_in_world, gizmo_z_in_world, 0)], // Y axis
+            [gizmo_origin_in_world, new Vector4D(0, 0, gizmo_length_in_world + gizmo_z_in_world, 0)], // Z axis
+            [gizmo_origin_in_world, new Vector4D(0, 0, gizmo_z_in_world, gizmo_length_in_world)]  // W axis
+        ];
+        const hypercamera_height_above_ground = 1.0;
+        let hypercamera_T = new Transform4D([
+            [1, 0, 0, 0, 0],
+            [0, 1, 0, 0, 0],
+            [0, 0, 1, 0, 0],
+            [0, 0, 0, 1, 0],
+            [0, 0, 0, 0, 1]
+        ]); // hypercam in world
+        // let hf = 1.0; // hyper focal length
+        // let hypercamera_intrinsics = [
+            // [hf, 0, 0, 0],
+            // [0, hf, 0, 0],
+            // [0, 0, hf, 0],
+            // [0, 0, 0, 1]
+        // ]; // see TODO s , for now assume identity intrinsics
+        let hypercamera_sensor_size = 1
+        let hypercamera_sensor_uvl_range = [-1, 1, -1, 1, -1, 1]; // u_min, u_max, v_min, v_max, l_min, l_max
+        let hypercamera_is_unit_sensor = true;
+
+        // define a hypercube object
+        const OSZ = floor_heightmap(0, 0, 0) + 3.0; // object spawn z
+        const const_hypercube_vertices = [ 
+                new Vector4D(-1, -1, -1, -1),
+                new Vector4D( 1, -1, -1, -1),
+                new Vector4D( 1,  1, -1, -1),
+                new Vector4D(-1,  1, -1, -1),
+                new Vector4D(-1, -1,  1, -1),
+                new Vector4D( 1, -1,  1, -1),
+                new Vector4D( 1,  1,  1, -1),
+                new Vector4D(-1,  1,  1, -1),
+                new Vector4D(-1, -1, -1,  1),
+                new Vector4D( 1, -1, -1,  1),
+                new Vector4D( 1,  1, -1,  1),
+                new Vector4D(-1,  1, -1,  1),
+                new Vector4D(-1, -1,  1,  1),
+                new Vector4D( 1, -1,  1,  1),
+                new Vector4D( 1,  1,  1,  1),
+                new Vector4D(-1,  1,  1,  1)
+            ];
+        // Tetrahedras
+        function create_40_tetrahedra_tiling_of_hypercube(cube_vertices) {
+            // cube_vertices need to all be -1 or 1 values (i.e. in unit cube coord system) for this to work!
+            const p = 1.0;
+            const n = -1.0;
+            // for the 3D cube, these are the tetrahedra vertices
+            // [[p, n, n], [n, n, n], [p, p, n], [p, n, p]], // tet at corner p n n
+            // [[n, p, n], [p, p, n], [n, n, n], [n, p, p]], // tet at corner n p n
+            // [[n, n, p], [p, n, p], [n, p, p], [n, n, n]], // tet at corner n n p
+            // [[p, p, p], [n, p, p], [p, n, p], [p, p, n]], // tet at corner p p p
+            // [[n, n, n], [p, p, n], [n, p, p], [p, n, p]]  // tet at center
+
+            // to create 5 tet at each of the 8 cubes in the hypercube, we set one of the 4dims to either p or n and fill the remaining 3 with the above
+            // for example if we tetrahedralize the cube at z = n, we set z = n and fill x=0, y=1, w=2 with the above
+            // [[p, n, z, n], [n, n, z, n], [p, p, z, n], [p, n, z, p]]
+            const xn = -1.0; // fixed x for this cube
+            const xp = 1.0;  // fixed x for this cube
+            const yn = -1.0; // fixed y for this cube
+            const yp = 1.0;  // fixed y for this cube
+            const zn = -1.0; // fixed z for this cube
+            const zp = 1.0;  // fixed z for this cube
+            const wn = -1.0; // fixed w for this cube
+            const wp = 1.0;  // fixed w for this cube
+            const tetrahedron_40_tiling_of_hypercube = [
+                // cube at x = n
+                [[xn, p, n, n], [xn, n, n, n], [xn, p, p, n], [xn, p, n, p]], // tet at corner p n n
+                [[xn, n, p, n], [xn, p, p, n], [xn, n, n, n], [xn, n, p, p]], // tet at corner n p n
+                [[xn, n, n, p], [xn, p, n, p], [xn, n, p, p], [xn, n, n, n]], // tet at corner n n p
+                [[xn, p, p, p], [xn, n, p, p], [xn, p, n, p], [xn, p, p, n]], // tet at corner p p p
+                [[xn, n, n, n], [xn, p, p, n], [xn, n, p, p], [xn, p, n, p]], // tet at center
+                // cube at x = p
+                [[xp, p, n, n], [xp, n, n, n], [xp, p, p, n], [xp, p, n, p]], // tet at corner p n n
+                [[xp, n, p, n], [xp, p, p, n], [xp, n, n, n], [xp, n, p, p]], // tet at corner n p n
+                [[xp, n, n, p], [xp, p, n, p], [xp, n, p, p], [xp, n, n, n]], // tet at corner n n p
+                [[xp, p, p, p], [xp, n, p, p], [xp, p, n, p], [xp, p, p, n]], // tet at corner p p p
+                [[xp, n, n, n], [xp, p, p, n], [xp, n, p, p], [xp, p, n, p]], // tet at center
+                // cube at y = n
+                [[p, yn, n, n], [n, yn, n, n], [p, yn, p, n], [p, yn, n, p]], // tet at corner p n n
+                [[n, yn, p, n], [p, yn, p, n], [n, yn, n, n], [n, yn, p, p]], // tet at corner n p n
+                [[n, yn, n, p], [p, yn, n, p], [n, yn, p, p], [n, yn, n, n]], // tet at corner n n p
+                [[p, yn, p, p], [n, yn, p, p], [p, yn, n, p], [p, yn, p, n]], // tet at corner p p p
+                [[n, yn, n, n], [p, yn, p, n], [n, yn, p, p], [p, yn, n, p]], // tet at center
+                // cube at y = p
+                [[p, yp, n, n], [n, yp, n, n], [p, yp, p, n], [p, yp, n, p]], // tet at corner p n n
+                [[n, yp, p, n], [p, yp, p, n], [n, yp, n, n], [n, yp, p, p]], // tet at corner n p n
+                [[n, yp, n, p], [p, yp, n, p], [n, yp, p, p], [n, yp, n, n]], // tet at corner n n p
+                [[p, yp, p, p], [n, yp, p, p], [p, yp, n, p], [p, yp, p, n]], // tet at corner p p p
+                [[n, yp, n, n], [p, yp, p, n], [n, yp, p, p], [p, yp, n, p]], // tet at center
+                // cube at z = n
+                [[p, n, zn, n], [n, n, zn, n], [p, p, zn, n], [p, n, zn, p]], // tet at corner p n n
+                [[n, p, zn, n], [p, p, zn, n], [n, n, zn, n], [n, p, zn, p]], // tet at corner n p n
+                [[n, n, zn, p], [p, n, zn, p], [n, p, zn, p], [n, n, zn, n]], // tet at corner n n p
+                [[p, p, zn, p], [n, p, zn, p], [p, n, zn, p], [p, p, zn, n]], // tet at corner p p p
+                [[n, n, zn, n], [p, p, zn, n], [n, p, zn, p], [p, n, zn, p]], // tet at center
+                // cube at z = p 
+                [[p, n, zp, n], [n, n, zp, n], [p, p, zp, n], [p, n, zp, p]], // tet at corner p n n
+                [[n, p, zp, n], [p, p, zp, n], [n, n, zp, n], [n, p, zp, p]], // tet at corner n p n
+                [[n, n, zp, p], [p, n, zp, p], [n, p, zp, p], [n, n, zp, n]], // tet at corner n n p
+                [[p, p, zp, p], [n, p, zp, p], [p, n, zp, p], [p, p, zp, n]], // tet at corner p p p
+                [[n, n, zp, n], [p, p, zp, n], [n, p, zp, p], [p, n, zp, p]], // tet at center
+                // cube at w = n
+                [[p, n, n, wn], [n, n, n, wn], [p, p, n, wn], [p, n, p, wn]], // tet at corner p n n
+                [[n, p, n, wn], [p, p, n, wn], [n, n, n, wn], [n, p, p, wn]], // tet at corner n p n
+                [[n, n, p, wn], [p, n, p, wn], [n, p, p, wn], [n, n, n, wn]], // tet at corner n n p
+                [[p, p, p, wn], [n, p, p, wn], [p, n, p, wn], [p, p, n, wn]], // tet at corner p p p
+                [[n, n, n, wn], [p, p, n, wn], [n, p, p, wn], [p, n, p, wn]], // tet at center
+                // cube at w = p
+                [[p, n, n, wp], [n, n, n, wp], [p, p, n, wp], [p, n, p, wp]], // tet at corner p n n
+                [[n, p, n, wp], [p, p, n, wp], [n, n, n, wp], [n, p, p, wp]], // tet at corner n p n
+                [[n, n, p, wp], [p, n, p, wp], [n, p, p, wp], [n, n, n, wp]], // tet at corner n n p
+                [[p, p, p, wp], [n, p, p, wp], [p, n, p, wp], [p, p, n, wp]], // tet at corner p p p
+                [[n, n, n, wp], [p, p, n, wp], [n, p, p, wp], [p, n, p, wp]]  // tet at center
+            ];
+
+            // convert to index
+            let tetrahedra_indices = [];
+            for (let tet of tetrahedron_40_tiling_of_hypercube) {
+                let tet_indices = [];
+                for (let v of tet) {
+                    // find index in cube_vertices
+                    for (let i = 0; i < cube_vertices.length; i++) {
+                        let cv = cube_vertices[i];
+                        if (cv.x === v[0] && cv.y === v[1] && cv.z === v[2] && cv.w === v[3]) {
+                            tet_indices.push(i);
+                            break;
+                        }
+                    }
+                }
+                if (tet_indices.length !== 4) {
+                    console.error("Error creating tetrahedra indices");
+                }
+                tetrahedra_indices.push(tet_indices);
+            }
+            return tetrahedra_indices;
+        }
+        let hypercube = new Hyperobject(
+            // vertices in object frame
+            const_hypercube_vertices,
+            // edges:
+            [
+                [0,1],[1,2],[2,3],[3,0],
+                [4,5],[5,6],[6,7],[7,4],
+                [0,4],[1,5],[2,6],[3,7],
+                [8,9],[9,10],[10,11],[11,8],
+                [12,13],[13,14],[14,15],[15,12],
+                [8,12],[9,13],[10,14],[11,15],
+                [0,8],[1,9],[2,10],[3,11],
+                [4,12],[5,13],[6,14],[7,15]
+            ],
+            // tetras
+            create_40_tetrahedra_tiling_of_hypercube(const_hypercube_vertices),
+            // color
+            0xff0000,
+            // simulate_physics
+            true,
+            // show_vertices
+            true,
+            // mass
+            1.0,
+            // pose (Transform4D)
+            new Transform4D([
+                [1, 0, 0, 0, 4],
+                [0, 1, 0, 0, 0],
+                [0, 0, 1, 0, OSZ],
+                [0, 0, 0, 1, 0],
+                [0, 0, 0, 0, 1]
+            ]),
+            // name
+            "Hypercube"
+        );
+
+        // define a hyperpyramid object
+        let hyperpyramid = new Hyperobject(
+            // vertices in object frame
+            [
+                new Vector4D(0, 0, 1, 0),
+                new Vector4D(1, 1, -1, 1),
+                new Vector4D(1, -1, -1, -1),
+                new Vector4D(-1, 1, -1, -1),
+                new Vector4D(-1, -1, -1, 1)
+            ],
+            // edges
+            [
+                [0,1],[0,2],[0,3],[0,4],
+                [1,2],[1,3],[1,4],
+                [2,3],[2,4],
+                [3,4]
+            ],
+            // tetras
+            [
+                [0,1,2,3],
+                [0,1,2,4],
+                [0,1,3,4],
+                [0,2,3,4],
+                [1,2,3,4]
+            ],
+            // color
+            0x00ff00,
+            // simulate_physics
+            true,
+            // show_vertices
+            true,
+            // mass
+            1.0,
+            // pose (Transform4D)
+            new Transform4D([
+                [1, 0, 0, 0, -4],
+                [0, 1, 0, 0, -3],
+                [0, 0, 1, 0, OSZ],
+                [0, 0, 0, 1, 4],
+                [0, 0, 0, 0, 1]
+            ]),
+            // name
+            "Hyperpyramid"
+        );
+
+        // build a hyperfloor surface (triangle mesh)
+        // 1. assign a z for each (x,y,w) grid point
+        // 2. build triangles between grid points
+        const GRID_LIMS = {
+            x_min: -scene_bound,
+            x_max: scene_bound,
+            y_min: -scene_bound,
+            y_max: scene_bound,
+            z_min: -scene_bound,
+            z_max: scene_bound,
+            w_min: -scene_bound,
+            w_max: scene_bound
+        };
+        const N_TILES = 2;
+        const GRID_RES = 2 * scene_bound / N_TILES; // grid resolution
+        const n_i = Math.floor((GRID_LIMS.x_max - GRID_LIMS.x_min) / GRID_RES) + 1;
+        const n_j = Math.floor((GRID_LIMS.y_max - GRID_LIMS.y_min) / GRID_RES) + 1;
+        const n_k = Math.floor((GRID_LIMS.w_max - GRID_LIMS.w_min) / GRID_RES) + 1;
+        function floor_heightmap(x, y, w) {
+            return 0 + x * 0.1;
+        }
+        let grid_vertices = [];
+        let grid_edges = [];
+        let grid_tetras = [];
+        for (let i = 0; i < n_i; i++) {
+            for (let j = 0; j < n_j; j++) {
+                for (let k = 0; k < n_k; k++) {
+                    let x = GRID_LIMS.x_min + i * GRID_RES;
+                    let y = GRID_LIMS.y_min + j * GRID_RES;
+                    let w = GRID_LIMS.w_min + k * GRID_RES;
+                    // let z = Math.sin(0.2 * x) * Math.cos(0.2 * y) * 5; // example height function
+                    let z = floor_heightmap(x, y, w);
+                    grid_vertices.push(new Vector4D(x, y, z, w));
+                    // add an edge to the next vertex in x
+                    if (i < n_i - 1) {
+                        let next_index = grid_vertices.length + (n_j * n_k) - 1;
+                        grid_edges.push([grid_vertices.length - 1, next_index]);
+                    }
+                    // add an edge to the next vertex in y
+                    if (j < n_j - 1) {
+                        let next_index = grid_vertices.length + n_k - 1;
+                        grid_edges.push([grid_vertices.length - 1, next_index]);
+                    }
+                    // add an edge to the next vertex in w
+                    if (k < n_k - 1) {
+                        let next_index = grid_vertices.length;
+                        grid_edges.push([grid_vertices.length - 1, next_index]);
+                    }
+                    // add an edge between next x and next y
+                    if (i < n_i - 1 && j < n_j - 1) {
+                        let next_x_index = grid_vertices.length + (n_j * n_k) - 1;
+                        let next_y_index = grid_vertices.length + n_k - 1;
+                        grid_edges.push([next_x_index, next_y_index]);
+                    }
+                    // add an edge between next x and next w
+                    if (i < n_i - 1 && k < n_k - 1) {
+                        let next_x_index = grid_vertices.length + (n_j * n_k) - 1;
+                        let next_w_index = grid_vertices.length;
+                        grid_edges.push([next_x_index, next_w_index]);
+                    }
+                    // add an edge between next y and next w
+                    if (j < n_j - 1 && k < n_k - 1) {
+                        let next_y_index = grid_vertices.length + n_k - 1;
+                        let next_w_index = grid_vertices.length;
+                        grid_edges.push([next_y_index, next_w_index]);
+                    }
+                    // add 5 tetras between this grid point and the next in x,y,w
+                    if (i < n_i - 1 && j < n_j - 1 && k < n_k - 1) {
+                        let nnn = i * n_j * n_k + j * n_k + k;
+                        let pnn = (i + 1) * n_j * n_k + j * n_k + k;
+                        let npn = i * n_j * n_k + (j + 1) * n_k + k;
+                        let ppn = (i + 1) * n_j * n_k + (j + 1) * n_k + k;
+                        let nnp = i * n_j * n_k + j * n_k + (k + 1);
+                        let pnp = (i + 1) * n_j * n_k + j * n_k + (k + 1);
+                        let npp = i * n_j * n_k + (j + 1) * n_k + (k + 1);
+                        let ppp = (i + 1) * n_j * n_k + (j + 1) * n_k + (k + 1);
+                        let cell_tetras = [
+                            [pnn, nnn, ppn, pnp], // tet at corner p n n
+                            [npn, ppn, nnn, npp], // tet at corner n p n
+                            [nnp, pnp, npp, nnn], // tet at corner n n p
+                            [ppp, npp, pnp, ppn], // tet at corner p p p
+                            [nnn, ppn, npp, pnp]  // tet at center
+                        ];
+                        for (let tet of cell_tetras) { grid_tetras.push(tet); }
+                    }
+                }
+            }
+        }
+        // create the class
+        let hyperfloor = new Hyperobject(
+            // vertices in object frame
+            grid_vertices,
+            // edges
+            grid_edges,
+            // tetras
+            grid_tetras,
+            // color
+            0x000088,
+            // simulate_physics
+            false,
+            // show_vertices
+            false,
+            // mass
+            1.0,
+            // pose (Transform4D)
+            new Transform4D([
+                [1, 0, 0, 0, 0],
+                [0, 1, 0, 0, 0],
+                [0, 0, 1, 0, 0],
+                [0, 0, 0, 1, 0],
+                [0, 0, 0, 0, 1]
+            ]),
+            // name
+            "Hyperfloor"
+        );
+
+        // Hypertree
+        if (false) {
+            let tree_vertices = [];
+            let tree_edges = [];
+            let tree_graph = []; // level 0: [(0, 1)], level 1: [(1, 2), (1, 3)], level 2: ...
+            const tree_depth = 4;
+            const trunk_length = 3.0;
+            const branch_length_diminution = 0.5;
+            const branching_angle = Math.PI / 5; // 0 means straight
+            // generate level 0 (single branch)
+            let root = new Vector4D(0, 0, 0, 0);
+            let trunk = new Vector4D(0, 0, trunk_length, 0);
+            tree_vertices.push(root);
+            tree_vertices.push(trunk);
+            tree_edges.push([0, 1]);
+            tree_graph.push([[0, 1]]); // level 0
+            // generate level 1 to n
+            for (let d = 1; d <= tree_depth; d++) {
+                let level_edges = [];
+                let parent_level_edges = tree_graph[d - 1];
+                for (let parent_edge of parent_level_edges) {
+                    let parent_tip_index = parent_edge[1];
+                    let parent_tip = tree_vertices[parent_tip_index];
+                    let parent_vector = new Vector4D(
+                        parent_tip.x - tree_vertices[parent_edge[0]].x,
+                        parent_tip.y - tree_vertices[parent_edge[0]].y,
+                        parent_tip.z - tree_vertices[parent_edge[0]].z,
+                        parent_tip.w - tree_vertices[parent_edge[0]].w
+                    );
+                    let normalized_parent_vector = parent_vector.normalize();
+                    // create deltas off of main vector
+                    // create a random delta vector, add it and its negative to the current vector and normalize
+                    let orthogonal_delta_vector;
+                    while (true) {
+                        let random_delta_vector = new Vector4D(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+                        // remove projection onto parent_vector to make it orthogonal, then normalize
+                        orthogonal_delta_vector = random_delta_vector.subtract(
+                            normalized_parent_vector.multiply_by_scalar(
+                                random_delta_vector.dot(normalized_parent_vector)
+                            )
+                        );
+                        // break the loop if orthogonal_delta_vector is not zero
+                        if (orthogonal_delta_vector.magnitude() > 0.0001) {
+                            orthogonal_delta_vector = orthogonal_delta_vector.normalize();
+                            break;
+                        }
+                    }
+
+                    let new_branch_vectors = [];
+                    // first branch: parent vector + angle_factor * orthogonal
+                    // tan(angle) = (factor * orthogonal_magnitude) / parent_magnitude
+                    // e.g. if angle is 45deg, factor is 1
+                    // if angle is 30deg, factor is tan(30) = 0.577
+                    new_branch_vectors.push( normalized_parent_vector.add( orthogonal_delta_vector.multiply_by_scalar( Math.tan(branching_angle))).normalize());
+                    new_branch_vectors.push( normalized_parent_vector.subtract( orthogonal_delta_vector.multiply_by_scalar( Math.tan(branching_angle))).normalize());
+
+                    // create new branches
+                    for (let new_branch_vector of new_branch_vectors) {
+                        let branch_length = trunk_length * Math.pow(branch_length_diminution, d);
+                        let new_tip = new Vector4D(
+                            parent_tip.x + new_branch_vector.x * branch_length,
+                            parent_tip.y + new_branch_vector.y * branch_length,
+                            parent_tip.z + new_branch_vector.z * branch_length,
+                            parent_tip.w + new_branch_vector.w * branch_length
+                        );
+                        tree_vertices.push(new_tip);
+                        let new_tip_index = tree_vertices.length - 1;
+                        tree_edges.push([parent_tip_index, new_tip_index]);
+                        level_edges.push([parent_tip_index, new_tip_index]);
+                    }
+
+                }
+                tree_graph.push(level_edges);
+            }
+
+
+            let hypertree = new Hyperobject(
+                // vertices in object frame
+                tree_vertices,
+                // edges
+                tree_edges,
+                // tetras
+                [],
+                // color
+                0x888800,
+                // simulate_physics
+                false,
+                // show_vertices
+                true,
+                // mass
+                1.0,
+                // pose (Transform4D)
+                new Transform4D([
+                    [1, 0, 0, 0, 0],
+                    [0, 1, 0, 0, 4],
+                    [0, 0, 1, 0, 0],
+                    [0, 0, 0, 1, -4],
+                    [0, 0, 0, 0, 1]
+                ]),
+                // name
+                "Hypertree"
+            );
+        }
+
+
+        // scene definition
+        let hyperscene_visible_objects = [
+            hypercube, 
+            hyperpyramid,
+            hyperfloor,
+            // hypertree
+        ];
+
+        // OrbitControls implementation
+        THREE.OrbitControls = function(camera, domElement) {
+            this.camera = camera;
+            this.domElement = domElement;
+            this.enabled = true;
+            this.target = new THREE.Vector3();
+            
+            const scope = this;
+            const rotateSpeed = 1.0;
+            const zoomSpeed = 1.0;
+            
+            let rotateStart = new THREE.Vector2();
+            let rotateEnd = new THREE.Vector2();
+            let rotateDelta = new THREE.Vector2();
+            
+            let spherical = new THREE.Spherical();
+            let sphericalDelta = new THREE.Spherical();
+            
+            let scale = 1;
+            const EPS = 0.000001;
+            
+            this.update = function() {
+                const offset = new THREE.Vector3();
+                offset.copy(scope.camera.position).sub(scope.target);
+                
+                spherical.setFromVector3(offset);
+                spherical.theta += sphericalDelta.theta;
+                spherical.phi += sphericalDelta.phi;
+                spherical.phi = Math.max(EPS, Math.min(Math.PI - EPS, spherical.phi));
+                spherical.radius *= scale;
+                
+                offset.setFromSpherical(spherical);
+                scope.camera.position.copy(scope.target).add(offset);
+                scope.camera.lookAt(scope.target);
+                
+                sphericalDelta.set(0, 0, 0);
+                scale = 1;
+            };
+            
+            function onMouseDown(event) {
+                on_first_user_interaction();
+                if (!scope.enabled) return;
+                event.preventDefault();
+                rotateStart.set(event.clientX, event.clientY);
+                document.addEventListener('mousemove', onMouseMove);
+                document.addEventListener('mouseup', onMouseUp);
+            }
+            
+            function onMouseMove(event) {
+                if (!scope.enabled) return;
+                event.preventDefault();
+                rotateEnd.set(event.clientX, event.clientY);
+                rotateDelta.subVectors(rotateEnd, rotateStart).multiplyScalar(rotateSpeed);
+                
+                sphericalDelta.theta -= 2 * Math.PI * rotateDelta.x / scope.domElement.clientHeight;
+                sphericalDelta.phi -= 2 * Math.PI * rotateDelta.y / scope.domElement.clientHeight;
+                
+                rotateStart.copy(rotateEnd);
+                scope.update();
+            }
+            
+            function onMouseUp() {
+                document.removeEventListener('mousemove', onMouseMove);
+                document.removeEventListener('mouseup', onMouseUp);
+            }
+            
+            function onMouseWheel(event) {
+                if (!scope.enabled) return;
+                event.preventDefault();
+                if (event.deltaY < 0) {
+                    scale /= 0.95;
+                } else if (event.deltaY > 0) {
+                    scale *= 0.95;
+                }
+                scope.update();
+            }
+            
+            this.domElement.addEventListener('mousedown', onMouseDown);
+            this.domElement.addEventListener('wheel', onMouseWheel);
+        };
+        
+        // Scene setup
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x1a1a2e);
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(2, 2, -2);
+        camera.lookAt(0, 0, 0);
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.getElementById('main-canvas').appendChild(renderer.domElement);
+        const controls = new THREE.OrbitControls(camera, renderer.domElement); // Add OrbitControls
+        
+        // Create bounding box
+        const UVLBoxSize = 2 * hypercamera_sensor_size; // we assume the UVL range is -1 to 1 in each dimension (see hypercamera_sensor_uvl_range)
+        const boxGeometry = new THREE.BoxGeometry(UVLBoxSize, UVLBoxSize, UVLBoxSize);
+        const boxEdges = new THREE.EdgesGeometry(boxGeometry);
+        const boxMaterial = new THREE.LineBasicMaterial({ color: 0x444444, transparent: true, opacity: 0.3 });
+        const boundingBox = new THREE.LineSegments(boxEdges, boxMaterial);
+        scene.add(boundingBox);
+
+        // Setup XZ projection (top view)
+        const projectionSize = 200;
+        const xzScene = new THREE.Scene();
+        const CSZ = scene_bound * 1.2;
+        xzScene.background = new THREE.Color(0x0a0a1a);
+        const xzCamera = new THREE.OrthographicCamera(-CSZ, CSZ, CSZ, -CSZ, 0.1, 100);
+        xzCamera.position.set(20, 0, 0);
+        xzCamera.lookAt(0, 0, 0);
+        const xzRenderer = new THREE.WebGLRenderer({ antialias: true });
+        xzRenderer.setSize(projectionSize, projectionSize);
+        document.getElementById('xz-canvas').appendChild(xzRenderer.domElement);
+
+        // Setup YZ projection (side view)
+        const yzScene = new THREE.Scene();
+        yzScene.background = new THREE.Color(0x0a0a1a);
+        const yzCamera = new THREE.OrthographicCamera(-CSZ, CSZ, CSZ, -CSZ, 0.1, 100);
+        yzCamera.position.set(20, 0, 0);
+        yzCamera.lookAt(0, 0, 0);
+        const yzRenderer = new THREE.WebGLRenderer({ antialias: true });
+        yzRenderer.setSize(projectionSize, projectionSize);
+        document.getElementById('yz-canvas').appendChild(yzRenderer.domElement);
+
+        // Setup WZ projection (AnaKata view)
+        const wzScene = new THREE.Scene();
+        wzScene.background = new THREE.Color(0x0a0a1a);
+        const wzCamera = new THREE.OrthographicCamera(-CSZ, CSZ, CSZ, -CSZ, 0.1, 100);
+        wzCamera.position.set(20, 0, 0);
+        wzCamera.lookAt(0, 0, 0);
+        const wzRenderer = new THREE.WebGLRenderer({ antialias: true });
+        wzRenderer.setSize(projectionSize, projectionSize);
+        document.getElementById('wz-canvas').appendChild(wzRenderer.domElement);
+
+        // Setup YW projection (Weird view)
+        const ywScene = new THREE.Scene();
+        ywScene.background = new THREE.Color(0x0a0a1a);
+        const ywCamera = new THREE.OrthographicCamera(-CSZ, CSZ, CSZ, -CSZ, 0.1, 100);
+        ywCamera.position.set(20, 0, 0);
+        ywCamera.lookAt(0, 0, 0);
+        const ywRenderer = new THREE.WebGLRenderer({ antialias: true });
+        ywRenderer.setSize(projectionSize, projectionSize);
+        document.getElementById('yw-canvas').appendChild(ywRenderer.domElement);
+
+        // Setup XW projection (Strange view)
+        const xwScene = new THREE.Scene();
+        xwScene.background = new THREE.Color(0x0a0a1a);
+        const xwCamera = new THREE.OrthographicCamera(-CSZ, CSZ, CSZ, -CSZ, 0.1, 100);
+        xwCamera.position.set(20, 0, 0);
+        xwCamera.lookAt(0, 0, 0);
+        const xwRenderer = new THREE.WebGLRenderer({ antialias: true });
+        xwRenderer.setSize(projectionSize, projectionSize);
+        document.getElementById('xw-canvas').appendChild(xwRenderer.domElement);
+
+        // Setup XY projection (Top-down view)
+        const xyScene = new THREE.Scene();
+        xyScene.background = new THREE.Color(0x0a0a1a);
+        const xyCamera = new THREE.OrthographicCamera(-CSZ, CSZ, CSZ, -CSZ, 0.1, 100);
+        xyCamera.position.set(20, 0, 0);
+        xyCamera.lookAt(0, 0, 0);
+        const xyRenderer = new THREE.WebGLRenderer({ antialias: true });
+        xyRenderer.setSize(projectionSize, projectionSize);
+        document.getElementById('xy-canvas').appendChild(xyRenderer.domElement);
+
+
+        // Add bounding boxes to projections
+        const boxSize = scene_bound * 2;
+        const xzBox = new THREE.LineSegments(
+            new THREE.EdgesGeometry(new THREE.PlaneGeometry(boxSize, boxSize)),
+            new THREE.LineBasicMaterial({ color: 0x444444, transparent: true, opacity: 0.5 })
+        );
+        xzBox.rotation.y = Math.PI / 2;
+        xzScene.add(xzBox);
+
+        const yzBox = new THREE.LineSegments(
+            new THREE.EdgesGeometry(new THREE.PlaneGeometry(boxSize, boxSize)),
+            new THREE.LineBasicMaterial({ color: 0x444444, transparent: true, opacity: 0.5 })
+        );
+        yzBox.rotation.y = Math.PI / 2;
+        yzScene.add(yzBox);
+
+        const wzBox = new THREE.LineSegments(
+            new THREE.EdgesGeometry(new THREE.PlaneGeometry(boxSize, boxSize)),
+            new THREE.LineBasicMaterial({ color: 0x444444, transparent: true, opacity: 0.5 })
+        );
+        wzBox.rotation.y = Math.PI / 2;
+        wzScene.add(wzBox);
+
+
+        let selectedVertexIndex = 0;
+
+        // Materials
+        const vertexMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff88 });
+        const sunMaterial = new THREE.MeshBasicMaterial({ color: 0xffff00 });
+        const selectedVertexMaterial = new THREE.MeshBasicMaterial({ color: 0xff3366 });
+        const outOfSensorVertexMaterial = new THREE.MeshBasicMaterial({ color: 0x888888 });
+        const edgeMaterial = new THREE.LineBasicMaterial({ color: 0x4477ff, linewidth: 2 });
+        const outOfSensorEdgeMaterial = new THREE.LineBasicMaterial({ color: 0x444444, linewidth: 1 });
+        const frustrumMaterial = new THREE.LineBasicMaterial({ color: 0xffff00, linewidth: 1 });
+        const frustrumFarMaterial = new THREE.LineBasicMaterial({ color: 0x777700, linewidth: 1 });
+        const redGizmoMaterial = new THREE.LineBasicMaterial({ color: 0xff0000, linewidth: 2 });
+        const greenGizmoMaterial = new THREE.LineBasicMaterial({ color: 0x00ff00, linewidth: 2 });
+        const blueGizmoMaterial = new THREE.LineBasicMaterial({ color: 0x0000ff, linewidth: 2 });
+        const yellowGizmoMaterial = new THREE.LineBasicMaterial({ color: 0xffff00, linewidth: 2 });
+
+        // Threejs Mesh objects
+        let vertexMeshes = [];
+        let edgeMeshes = [];
+        // Orthogonal projection objects
+        let xzVertexMeshes = [];
+        let xzEdgeMeshes = [];
+        let yzVertexMeshes = [];
+        let yzEdgeMeshes = [];
+        let wzVertexMeshes = [];
+        let wzEdgeMeshes = [];
+        let ywVertexMeshes = [];
+        let ywEdgeMeshes = [];
+        let xwVertexMeshes = [];
+        let xwEdgeMeshes = [];
+        let xyVertexMeshes = [];
+        let xyEdgeMeshes = [];
+
+
+        // Create vertex meshes
+        function createThreeJSPrimitivesFromScene() {
+
+            // Clear existing meshes
+            vertexMeshes.forEach(mesh => mesh.geometry.dispose());
+            vertexMeshes.forEach(mesh => mesh.material.dispose());
+            vertexMeshes.forEach(mesh => scene.remove(mesh));
+            vertexMeshes = [];
+            xzVertexMeshes.forEach(mesh => mesh.geometry.dispose());
+            xzVertexMeshes.forEach(mesh => mesh.material.dispose());
+            xzVertexMeshes.forEach(mesh => xzScene.remove(mesh));
+            xzVertexMeshes = [];
+            yzVertexMeshes.forEach(mesh => mesh.geometry.dispose());
+            yzVertexMeshes.forEach(mesh => mesh.material.dispose());
+            yzVertexMeshes.forEach(mesh => yzScene.remove(mesh));
+            yzVertexMeshes = [];
+            wzVertexMeshes.forEach(mesh => mesh.geometry.dispose());
+            wzVertexMeshes.forEach(mesh => mesh.material.dispose());
+            wzVertexMeshes.forEach(mesh => wzScene.remove(mesh));
+            wzVertexMeshes = [];
+            ywVertexMeshes.forEach(mesh => mesh.geometry.dispose());
+            ywVertexMeshes.forEach(mesh => mesh.material.dispose());
+            ywVertexMeshes.forEach(mesh => ywScene.remove(mesh));
+            ywVertexMeshes = [];
+            xwVertexMeshes.forEach(mesh => mesh.geometry.dispose());
+            xwVertexMeshes.forEach(mesh => mesh.material.dispose());
+            xwVertexMeshes.forEach(mesh => xwScene.remove(mesh));
+            xwVertexMeshes = [];
+            xyVertexMeshes.forEach(mesh => mesh.geometry.dispose());
+            xyVertexMeshes.forEach(mesh => mesh.material.dispose());
+            xyVertexMeshes.forEach(mesh => xyScene.remove(mesh));
+            xyVertexMeshes = [];
+            // Clear existing edges
+            edgeMeshes.forEach(mesh => mesh.geometry.dispose());
+            edgeMeshes.forEach(mesh => mesh.material.dispose());
+            edgeMeshes.forEach(mesh => scene.remove(mesh));
+            edgeMeshes = [];
+            xzEdgeMeshes.forEach(mesh => mesh.geometry.dispose());
+            xzEdgeMeshes.forEach(mesh => mesh.material.dispose());
+            xzEdgeMeshes.forEach(mesh => xzScene.remove(mesh));
+            xzEdgeMeshes = [];
+            yzEdgeMeshes.forEach(mesh => mesh.geometry.dispose());
+            yzEdgeMeshes.forEach(mesh => mesh.material.dispose());
+            yzEdgeMeshes.forEach(mesh => yzScene.remove(mesh));
+            yzEdgeMeshes = [];
+            wzEdgeMeshes.forEach(mesh => mesh.geometry.dispose());
+            wzEdgeMeshes.forEach(mesh => mesh.material.dispose());
+            wzEdgeMeshes.forEach(mesh => wzScene.remove(mesh));
+            wzEdgeMeshes = [];
+            ywEdgeMeshes.forEach(mesh => mesh.geometry.dispose());
+            ywEdgeMeshes.forEach(mesh => mesh.material.dispose());
+            ywEdgeMeshes.forEach(mesh => ywScene.remove(mesh));
+            ywEdgeMeshes = [];
+            xwEdgeMeshes.forEach(mesh => mesh.geometry.dispose());
+            xwEdgeMeshes.forEach(mesh => mesh.material.dispose());
+            xwEdgeMeshes.forEach(mesh => xwScene.remove(mesh));
+            xwEdgeMeshes = [];
+            xyEdgeMeshes.forEach(mesh => mesh.geometry.dispose());
+            xyEdgeMeshes.forEach(mesh => mesh.material.dispose());
+            xyEdgeMeshes.forEach(mesh => xyScene.remove(mesh));
+            xyEdgeMeshes = [];
+
+            // Graph data structure
+            // meshes reprojected "inside" the camera sensor
+
+            // Create camera frustum
+            // origin to (1, u-, v-, l-), (1, u+, v-, l-), ... reprojected to camera frame, reprojected to world
+            let camera_edges_in_suvl = [
+                [[0, 0, 0, 0], [1, -1, -1, -1]],
+                [[0, 0, 0, 0], [1,  1, -1, -1]],
+                [[0, 0, 0, 0], [1,  1,  1, -1]],
+                [[0, 0, 0, 0], [1, -1,  1, -1]],
+                [[0, 0, 0, 0], [1, -1, -1,  1]],
+                [[0, 0, 0, 0], [1,  1, -1,  1]],
+                [[0, 0, 0, 0], [1,  1,  1,  1]],
+                [[0, 0, 0, 0], [1, -1,  1,  1]]
+            ];
+            let camera_edges_in_world = [];
+            for (let [start, end] of camera_edges_in_suvl) {
+                let start_in_cam = new Vector4D(start[0], start[1], start[2], start[3]); // TODO: apply reverse intrinsics
+                let end_in_cam = new Vector4D(end[0], end[1], end[2], end[3]); // TODO: apply reverse intrinsics
+                let start_in_world = hypercamera_T.transform_point(start_in_cam); // TODO: apply reverse camera transform
+                let end_in_world = hypercamera_T.transform_point(end_in_cam); // TODO: apply reverse camera transform
+                camera_edges_in_world.push([start_in_world, end_in_world]);
+            }
+
+            // Project 4D Scene into 2D Orthogonal Views
+            function render_in_threejs_orthogonal_scene(project_vertex_4D_to_2D_func, towardscam_func, scene2D, sceneMeshList, sceneEdgeList) {
+                // hyperobjects
+                for (let hyperobject of hyperscene_visible_objects) {
+                    let _ru_vertices = [];
+                    let _ru_edges = [];
+                    _ru_vertices = [];
+                    _ru_edges = [];
+                    // hyperobject
+                    for (let v of hyperobject.vertices_in_world) {
+                        _ru_vertices.push(project_vertex_4D_to_2D_func(v));
+                    }
+                    for (let [i, j] of hyperobject.edges) {
+                        _ru_edges.push([i, j]);
+                    }
+                    if (hyperobject.show_vertices) {
+                        _ru_vertices.forEach((pos, i) => {
+                            const _ruGeometry = new THREE.CircleGeometry(0.3, 16);
+                            const material = i === selectedVertexIndex ? selectedVertexMaterial : vertexMaterial;
+                            const _ruMesh = new THREE.Mesh(_ruGeometry, material);
+                            _ruMesh.position.set(pos.x, pos.y, pos.z);
+                            _ruMesh.rotation.y = Math.PI / 2;
+                            scene2D.add(_ruMesh);
+                            sceneMeshList.push(_ruMesh);
+                        });
+                    }
+                    _ru_edges.forEach(([i, j]) => {
+                        const _ruPoints = [
+                            new THREE.Vector3(_ru_vertices[i].x, _ru_vertices[i].y, _ru_vertices[i].z),
+                            new THREE.Vector3(_ru_vertices[j].x, _ru_vertices[j].y, _ru_vertices[j].z)
+                        ];
+                        const _ruGeometry = new THREE.BufferGeometry().setFromPoints(_ruPoints);
+                        const _ruLine = new THREE.Line(_ruGeometry, edgeMaterial);
+                        scene2D.add(_ruLine);
+                        sceneEdgeList.push(_ruLine);
+                    });
+                }
+                // gizmo
+                if (GIZMO_MODE == 1) {
+                    let gizmo_materials = [
+                        redGizmoMaterial,
+                        greenGizmoMaterial,
+                        blueGizmoMaterial,
+                        yellowGizmoMaterial
+                    ];
+                    for (let axis_index = 0; axis_index < gizmo_axes_in_world.length; axis_index++) {
+                        let [start_in_world, end_in_world] = gizmo_axes_in_world[axis_index];
+                        let start__ru = project_vertex_4D_to_2D_func(start_in_world);
+                        let end__ru = project_vertex_4D_to_2D_func(end_in_world);
+                        const _ruPoints = [
+                            new THREE.Vector3(start__ru.x, start__ru.y, start__ru.z),
+                            new THREE.Vector3(end__ru.x, end__ru.y, end__ru.z)
+                        ];
+                        const _ruGeometry = new THREE.BufferGeometry().setFromPoints(_ruPoints);
+                        const _ruLine = new THREE.Line(_ruGeometry, gizmo_materials[axis_index]);
+                        scene2D.add(_ruLine);
+                        sceneEdgeList.push(_ruLine);
+                    }
+                }
+                // camera frustrum
+                camera_edges_in_world.forEach(([start, end]) => {
+                    const _ruPoints = [
+                        project_vertex_4D_to_2D_func(start),
+                        project_vertex_4D_to_2D_func(end)
+                    ];
+                    const _ruGeometry = new THREE.BufferGeometry().setFromPoints(_ruPoints);
+                    const is_closest_4 = towardscam_func(end) >= towardscam_func(start);
+                    const material = is_closest_4 ? frustrumMaterial : frustrumFarMaterial;
+                    const _ruLine = new THREE.Line(_ruGeometry, material);
+                    scene2D.add(_ruLine);
+                    sceneEdgeList.push(_ruLine);
+                });
+            }
+
+            if (EXTRA_VIEWS === 1 || EXTRA_VIEWS === 2) {
+                function xz_project_vertex(v) { return new THREE.Vector3(0, v.z, -v.x); }
+                function xz_towardscam_dim(v) { return -v.y; }
+                function yz_project_vertex(v) { return new THREE.Vector3(0, v.z, -v.y); }
+                function yz_towardscam_dim(v) { return v.x; }
+                function wz_project_vertex(v) { return new THREE.Vector3(0, v.z, -v.w); }
+                function wz_towardscam_dim(v) { return -v.x; }
+                render_in_threejs_orthogonal_scene(xz_project_vertex, xz_towardscam_dim, xzScene, xzVertexMeshes, xzEdgeMeshes);
+                render_in_threejs_orthogonal_scene(yz_project_vertex, yz_towardscam_dim, yzScene, yzVertexMeshes, yzEdgeMeshes);
+                render_in_threejs_orthogonal_scene(wz_project_vertex, wz_towardscam_dim, wzScene, wzVertexMeshes, wzEdgeMeshes);
+            }
+
+            if (EXTRA_VIEWS === 2) {
+                function yw_project_vertex(v) { return new THREE.Vector3(0, v.w, -v.y); }
+                function yw_towardscam_dim(v) { return -v.x; }
+                function xw_project_vertex(v) { return new THREE.Vector3(0, v.w, -v.x); }
+                function xw_towardscam_dim(v) { return v.y; }
+                function xy_project_vertex(v) { return new THREE.Vector3(0, v.y, -v.x); }
+                function xy_towardscam_dim(v) { return v.z; }
+                render_in_threejs_orthogonal_scene(yw_project_vertex, yw_towardscam_dim, ywScene, ywVertexMeshes, ywEdgeMeshes);
+                render_in_threejs_orthogonal_scene(xw_project_vertex, xw_towardscam_dim, xwScene, xwVertexMeshes, xwEdgeMeshes);
+                render_in_threejs_orthogonal_scene(xy_project_vertex, xy_towardscam_dim, xyScene, xyVertexMeshes, xyEdgeMeshes);
+            }
+
+            // UVL Voxel Z Rasterization Mode
+            // 10x10x10 grid from -sensor_uvl_range to +sensor_uvl_range
+            // Solves M x = b for 4x4 matrix M and 4-element vector b
+            if (UVL_VOXEL_Z_RASTERIZATION_MODE === true) {
+                const GRID_RES_UVL = 8;
+                
+                // Optimized 4x4 solver with early exit checks
+                function solve4x4(M, b) {
+                    const A = M.map(row => row.slice());
+                    const x = b.slice();
+                    const n = 4;
+                    
+                    for (let i = 0; i < n; i++) {
+                        // Partial pivoting
+                        let maxRow = i;
+                        let maxVal = Math.abs(A[i][i]);
+                        for (let k = i + 1; k < n; k++) {
+                            const absVal = Math.abs(A[k][i]);
+                            if (absVal > maxVal) {
+                                maxVal = absVal;
+                                maxRow = k;
+                            }
+                        }
+                        if (maxVal < 1e-12) throw new Error("Singular matrix");
+
+                        // Swap rows
+                        if (maxRow !== i) {
+                            [A[i], A[maxRow]] = [A[maxRow], A[i]];
+                            [x[i], x[maxRow]] = [x[maxRow], x[i]];
+                        }
+
+                        // Eliminate below
+                        const invAii = 1 / A[i][i];
+                        for (let k = i + 1; k < n; k++) {
+                            const factor = A[k][i] * invAii;
+                            for (let j = i; j < n; j++) A[k][j] -= factor * A[i][j];
+                            x[k] -= factor * x[i];
+                        }
+                    }
+
+                    // Back substitution
+                    const sol = new Array(n);
+                    for (let i = n - 1; i >= 0; i--) {
+                        let sum = x[i];
+                        for (let j = i + 1; j < n; j++) sum -= A[i][j] * sol[j];
+                        sol[i] = sum / A[i][i];
+                    }
+                    return sol;
+                }
+
+                const VOXEL_SIDE = hypercamera_sensor_size * 2 / GRID_RES_UVL;
+                const eps = 1e-9;
+                
+                // Setup the voxel grid in the sensor
+                const u_start = hypercamera_sensor_uvl_range[0];
+                const u_step = (hypercamera_sensor_uvl_range[1] - u_start) / GRID_RES_UVL;
+                const v_start = hypercamera_sensor_uvl_range[2];
+                const v_step = (hypercamera_sensor_uvl_range[3] - v_start) / GRID_RES_UVL;
+                const l_start = hypercamera_sensor_uvl_range[4];
+                const l_step = (hypercamera_sensor_uvl_range[5] - l_start) / GRID_RES_UVL;
+                
+                // Pre-transform all tetrahedra to camera space (suvl) once
+                const camera_inverse = hypercamera_T.inverse();
+                const transformed_objects = hyperscene_visible_objects.map(obj => ({
+                    color: obj.color,
+                    tetras: obj.tetras.map(tetra => 
+                        tetra.map(idx => camera_inverse.transform_point(obj.vertices_in_world[idx]))
+                    )
+                }));
+                
+                // Ray origin is constant
+                const ray_origin = new Vector4D(0, 0, 0, 0);
+                
+                // generate 1000 rays
+                const voxels_to_create = [];
+                
+                for (let i_u = 0; i_u < GRID_RES_UVL; i_u++) {
+                    const u = u_start + (i_u + 0.5) * u_step;
+                    
+                    for (let i_v = 0; i_v < GRID_RES_UVL; i_v++) {
+                        const v = v_start + (i_v + 0.5) * v_step;
+                        
+                        for (let i_l = 0; i_l < GRID_RES_UVL; i_l++) {
+                            const l = l_start + (i_l + 0.5) * l_step;
+                            
+                            const ray_dir = new Vector4D(1, u, v, l).normalize();
+                            
+                            let hit_distance = Infinity;
+                            let hit_color = null;
+                            
+                            // Test intersection with all tetrahedra
+                            for (let obj of transformed_objects) {
+                                for (let tetra_verts of obj.tetras) {
+                                    const V0 = tetra_verts[0];
+                                    const V1 = tetra_verts[1];
+                                    const V2 = tetra_verts[2];
+                                    const V3 = tetra_verts[3];
+                                    
+                                    // Edge vectors
+                                    const U1 = V1.subtract(V0);
+                                    const U2 = V2.subtract(V0);
+                                    const U3 = V3.subtract(V0);
+                                    const B = ray_origin.subtract(V0);
+                                    
+                                    // Build matrix: columns [-D, U1, U2, U3]
+                                    const M = [
+                                        [-ray_dir.x, U1.x, U2.x, U3.x],
+                                        [-ray_dir.y, U1.y, U2.y, U3.y],
+                                        [-ray_dir.z, U1.z, U2.z, U3.z],
+                                        [-ray_dir.w, U1.w, U2.w, U3.w]
+                                    ];
+                                    
+                                    const b = [B.x, B.y, B.z, B.w];
+                                    
+                                    let solution;
+                                    try {
+                                        solution = solve4x4(M, b);
+                                    } catch(e) {
+                                        continue; // Singular matrix
+                                    }
+                                    
+                                    const t = solution[0];
+                                    const a = solution[1];
+                                    const b_ = solution[2];
+                                    const c = solution[3];
+                                    const alpha = 1 - a - b_ - c;
+                                    
+                                    // Check if valid intersection (inside tetra, in front of camera)
+                                    if (t >= 0 && t < hit_distance && 
+                                        alpha >= -eps && a >= -eps && b_ >= -eps && c >= -eps) {
+                                        hit_distance = t;
+                                        hit_color = obj.color;
+                                    }
+                                }
+                            }
+                            
+                            // Store voxel data for batch creation
+                            if (hit_distance !== Infinity) {
+                                voxels_to_create.push({ u, v, l, color: hit_color });
+                            }
+                        }
+                    }
+                }
+                
+                // Batch create all voxels (reuse geometry for better performance)
+                const geometry = new THREE.BoxGeometry(VOXEL_SIDE, VOXEL_SIDE, VOXEL_SIDE);
+                
+                for (let voxel of voxels_to_create) {
+                    const color = new THREE.Color(voxel.color);
+                    const material = new THREE.MeshBasicMaterial({
+                        color: color,
+                        transparent: true,
+                        opacity: 0.1
+                    });
+                    const cube = new THREE.Mesh(geometry, material);
+                    cube.position.set(voxel.u, voxel.v, voxel.l);
+                    scene.add(cube);
+                    vertexMeshes.push(cube);
+                }
+            } // end of UVL Voxel Z Rasterization Mode
+
+            // UVL Camera Sensor Projection
+            // Project Meshes into 3D Camera Sensor
+            for (let hyperobject of hyperscene_visible_objects) {
+                let uvl_vertices = [];
+                let uvl_vertices_s = []; // scaling factors
+                let uvl_edges = [];
+                uvl_vertices = [];
+                uvl_vertices_s = []; // scaling, a.k.a distance from camera sensor (>1 means further, <0 means behind, <1 means closer)
+                for (let v of hyperobject.vertices_in_world) {
+                    // Camera equation uvl ~= K * [R|t] * XYZW
+                    // we define x as the depth axis here (aka camera cube sensor is at x=1)
+                    // let xyzw_camframe = new Vector4D(v.x, v.y, v.z, v.w); // TODO do actual transform to camera frame
+                    let xyzw_camframe = hypercamera_T.inverse().transform_point(v);
+                    let suvl = [ xyzw_camframe.x, xyzw_camframe.y, xyzw_camframe.z, xyzw_camframe.w ]; // TODO: apply intrinsics
+                    let uvl = [ suvl[1] / suvl[0], suvl[2] / suvl[0], suvl[3] / suvl[0] ]; // perspective divide
+                    uvl_vertices.push(new THREE.Vector3(uvl[0], uvl[1], uvl[2]));
+                    uvl_vertices_s.push(suvl[0]);
+                }
+                uvl_edges = hyperobject.edges.slice();
+                if (hyperobject.show_vertices) {
+                    uvl_vertices.forEach((pos, i) => {
+                        // UVL 3D Camera Sensor
+                        const s = uvl_vertices_s[i];
+                        // Only render if in front of camera
+                        const is_in_front = s > 0;
+                        const is_inside_sensor = (
+                            pos.x >= hypercamera_sensor_uvl_range[0] &&
+                            pos.x <= hypercamera_sensor_uvl_range[1] &&
+                            pos.y >= hypercamera_sensor_uvl_range[2] &&
+                            pos.y <= hypercamera_sensor_uvl_range[3] &&
+                            pos.z >= hypercamera_sensor_uvl_range[4] &&
+                            pos.z <= hypercamera_sensor_uvl_range[5]
+                        );
+                        if (s > 0) {
+                            const geometry = new THREE.SphereGeometry(0.03, 8, 8);
+                            let material = i === selectedVertexIndex ? selectedVertexMaterial : vertexMaterial;
+                            if (!is_inside_sensor) {
+                                material = outOfSensorVertexMaterial;
+                            }
+                            const mesh = new THREE.Mesh(geometry, material);
+                            mesh.position.copy(pos);
+                            mesh.selectable_idx = i;
+                            scene.add(mesh);
+                            vertexMeshes.push(mesh);
+                        }
+                    });
+                }
+                // hyperobject Edges
+                uvl_edges.forEach(([i, j]) => {
+                    const are_both_vertices_in_front = (uvl_vertices_s[i] > 0 && uvl_vertices_s[j] > 0);
+                    if (!are_both_vertices_in_front) {
+                        return; // skip edges with vertices behind camera
+                    }
+                    const is_i_vertex_inside_sensor = (
+                        uvl_vertices[i].x >= hypercamera_sensor_uvl_range[0] &&
+                        uvl_vertices[i].x <= hypercamera_sensor_uvl_range[1] &&
+                        uvl_vertices[i].y >= hypercamera_sensor_uvl_range[2] &&
+                        uvl_vertices[i].y <= hypercamera_sensor_uvl_range[3] &&
+                        uvl_vertices[i].z >= hypercamera_sensor_uvl_range[4] &&
+                        uvl_vertices[i].z <= hypercamera_sensor_uvl_range[5]
+                    );
+                    const is_j_vertex_inside_sensor = (
+                        uvl_vertices[j].x >= hypercamera_sensor_uvl_range[0] &&
+                        uvl_vertices[j].x <= hypercamera_sensor_uvl_range[1] &&
+                        uvl_vertices[j].y >= hypercamera_sensor_uvl_range[2] &&
+                        uvl_vertices[j].y <= hypercamera_sensor_uvl_range[3] &&
+                        uvl_vertices[j].z >= hypercamera_sensor_uvl_range[4] &&
+                        uvl_vertices[j].z <= hypercamera_sensor_uvl_range[5]
+                    );
+                    const are_both_vertices_inside_sensor = (
+                        is_i_vertex_inside_sensor &&
+                        is_j_vertex_inside_sensor
+                    );
+                    const is_only_1_vertex_inside_sensor = (
+                        (is_i_vertex_inside_sensor && !is_j_vertex_inside_sensor) ||
+                        (!is_i_vertex_inside_sensor && is_j_vertex_inside_sensor)
+                    );
+                    if (!is_only_1_vertex_inside_sensor) {
+                        if (uvl_vertices_s[i] > 0 && uvl_vertices_s[j] > 0) {
+                            const points = [uvl_vertices[i], uvl_vertices[j]];
+                            const geometry = new THREE.BufferGeometry().setFromPoints(points);
+                            let material = edgeMaterial;
+                            if (!are_both_vertices_inside_sensor) {
+                                material = outOfSensorEdgeMaterial;
+                            }
+                            const line = new THREE.Line(geometry, material);
+                            scene.add(line);
+                            edgeMeshes.push(line);
+                        }
+                    }
+                    if (is_only_1_vertex_inside_sensor) {
+                        // Add an edge to the nearest face of the sensor cube
+                        const inside_idx = is_i_vertex_inside_sensor ? i : j;
+                        const outside_idx = is_i_vertex_inside_sensor ? j : i;
+                        const inside_vertex = uvl_vertices[inside_idx];
+                        const outside_vertex = uvl_vertices[outside_idx];
+                        // Find intersection with sensor cube
+                        let t_values = [];
+                        // x planes
+                        if (outside_vertex.x !== inside_vertex.x) {
+                            let t1 = (hypercamera_sensor_uvl_range[0] - inside_vertex.x) / (outside_vertex.x - inside_vertex.x);
+                            let t2 = (hypercamera_sensor_uvl_range[1] - inside_vertex.x) / (outside_vertex.x - inside_vertex.x);
+                            t_values.push(t1, t2);
+                        }
+                        // y planes
+                        if (outside_vertex.y !== inside_vertex.y) {
+                            let t1 = (hypercamera_sensor_uvl_range[2] - inside_vertex.y) / (outside_vertex.y - inside_vertex.y);
+                            let t2 = (hypercamera_sensor_uvl_range[3] - inside_vertex.y) / (outside_vertex.y - inside_vertex.y);
+                            t_values.push(t1, t2);
+                        }
+                        // z planes
+                        if (outside_vertex.z !== inside_vertex.z) {
+                            let t1 = (hypercamera_sensor_uvl_range[4] - inside_vertex.z) / (outside_vertex.z - inside_vertex.z);
+                            let t2 = (hypercamera_sensor_uvl_range[5] - inside_vertex.z) / (outside_vertex.z - inside_vertex.z);
+                            t_values.push(t1, t2);
+                        }
+                        // Find valid t in (0,1)
+                        let valid_t = t_values.filter(t => t > 0 && t < 1);
+                        if (valid_t.length > 0) {
+                            let t_closest = Math.min(...valid_t);
+                            let intersection_point = new THREE.Vector3(
+                                inside_vertex.x + t_closest * (outside_vertex.x - inside_vertex.x),
+                                inside_vertex.y + t_closest * (outside_vertex.y - inside_vertex.y),
+                                inside_vertex.z + t_closest * (outside_vertex.z - inside_vertex.z)
+                            );
+                            // Add a vertice at the intersection for debugging
+                            if (false) {
+                                const intersectionGeometry = new THREE.SphereGeometry(0.02, 8, 8);
+                                const intersectionMesh = new THREE.Mesh(intersectionGeometry, vertexMaterial);
+                                intersectionMesh.position.copy(intersection_point);
+                                scene.add(intersectionMesh);
+                                vertexMeshes.push(intersectionMesh);
+                            }
+
+                            const points_to_face = [inside_vertex, intersection_point];
+                            const geometry_to_face = new THREE.BufferGeometry().setFromPoints(points_to_face);
+                            const line_to_face = new THREE.Line(geometry_to_face, edgeMaterial);
+                            scene.add(line_to_face);
+                            edgeMeshes.push(line_to_face);
+                            // Add the greyed out edge from intersection to outside
+                            const points_from_face = [intersection_point, outside_vertex];
+                            const geometry_from_face = new THREE.BufferGeometry().setFromPoints(points_from_face);
+                            const line_from_face = new THREE.Line(geometry_from_face, outOfSensorEdgeMaterial);
+                            scene.add(line_from_face);
+                            edgeMeshes.push(line_from_face);
+                        }
+                    }
+                });
+            }
+            // hypersun
+            if (true) {
+                const v = new Vector4D(0, 0, 10000, 0); // very far away in +Z direction
+                // Camera equation uvl ~= K * [R|t] * XYZW
+                // we define x as the depth axis here (aka camera cube sensor is at x=1)
+                // let xyzw_camframe = new Vector4D(v.x, v.y, v.z, v.w); // TODO do actual transform to camera frame
+                let xyzw_camframe = hypercamera_T.inverse().transform_point(v);
+                let suvl = [ xyzw_camframe.x, xyzw_camframe.y, xyzw_camframe.z, xyzw_camframe.w ]; // TODO: apply intrinsics
+                let uvl = [ suvl[1] / suvl[0], suvl[2] / suvl[0], suvl[3] / suvl[0] ]; // perspective divide
+                const pos = new THREE.Vector3(uvl[0], uvl[1], uvl[2]);
+                const s = suvl[0];
+                // Only render if in front of camera
+                const is_in_front = s > 0;
+                const is_inside_sensor = (
+                    pos.x >= hypercamera_sensor_uvl_range[0] &&
+                    pos.x <= hypercamera_sensor_uvl_range[1] &&
+                    pos.y >= hypercamera_sensor_uvl_range[2] &&
+                    pos.y <= hypercamera_sensor_uvl_range[3] &&
+                    pos.z >= hypercamera_sensor_uvl_range[4] &&
+                    pos.z <= hypercamera_sensor_uvl_range[5]
+                );
+                if (s > 0) {
+                    const geometry = new THREE.SphereGeometry(0.03, 8, 8);
+                    let material = sunMaterial;
+                    if (!is_inside_sensor) {
+                        material = outOfSensorVertexMaterial;
+                    }
+                    const mesh = new THREE.Mesh(geometry, material);
+                    mesh.position.copy(pos);
+                    mesh.selectable_idx = 0;
+                    scene.add(mesh);
+                    vertexMeshes.push(mesh);
+                }
+            }
+            // hypergizmo
+            if (GIZMO_MODE > 0) {
+                let gizmo_materials = [
+                    redGizmoMaterial,
+                    greenGizmoMaterial,
+                    blueGizmoMaterial,
+                    yellowGizmoMaterial
+                ];
+                let gizmo_axes_suvl = [];
+                let gizmo_axes_s = [];
+                if (GIZMO_MODE == 1) { // gizmo at fixed place in the world
+                    // camera equation
+                    for (let [start, end] of gizmo_axes_in_world) {
+                        let start_in_cam = hypercamera_T.inverse().transform_point(start);
+                        let end_in_cam = hypercamera_T.inverse().transform_point(end);
+                        let suvl_start = [ start_in_cam.x, start_in_cam.y, start_in_cam.z, start_in_cam.w ]; // TODO: apply intrinsics
+                        let suvl_end = [ end_in_cam.x, end_in_cam.y, end_in_cam.z, end_in_cam.w ]; // TODO: apply intrinsics
+                        let uvl_start = [ suvl_start[1] / suvl_start[0], suvl_start[2] / suvl_start[0], suvl_start[3] / suvl_start[0] ]; // perspective divide
+                        let uvl_end = [ suvl_end[1] / suvl_end[0], suvl_end[2] / suvl_end[0], suvl_end[3] / suvl_end[0] ]; // perspective divide
+                        gizmo_axes_suvl.push([ new THREE.Vector3(uvl_start[0], uvl_start[1], uvl_start[2]), new THREE.Vector3(uvl_end[0], uvl_end[1], uvl_end[2]) ]);
+                        gizmo_axes_s.push([ suvl_start[0], suvl_end[0] ]);
+                    }
+                } else { // gizmo at fixed place in the sensor
+                    let gizmo_origin_in_suvl = new Vector4D(1, 0, 0, 0); // center of sensor
+                    // camera equation
+                    for (let axis_vec of gizmo_axes_vectors_in_world) {
+                        let suvl_start = gizmo_origin_in_suvl;
+                        let suvl_vec = hypercamera_T.inverse().transform_vector(axis_vec);
+                        let uvl_vec = new Vector4D(0, suvl_vec.y, suvl_vec.z, suvl_vec.w).normalize();
+                        let uvl_start = [ suvl_start.y, suvl_start.z, suvl_start.w ];
+                        let uvl_end = [ uvl_start[0] + uvl_vec.y * 0.2, uvl_start[1] + uvl_vec.z * 0.2, uvl_start[2] + uvl_vec.w * 0.2 ];
+                        gizmo_axes_suvl.push([ new THREE.Vector3(uvl_start[0], uvl_start[1], uvl_start[2]), new THREE.Vector3(uvl_end[0], uvl_end[1], uvl_end[2]) ]);
+                        gizmo_axes_s.push([ 1, 1 ]);
+                    }
+
+                }
+                // Make threejs edges
+                for (let i = 0; i < gizmo_axes_suvl.length; i++) {
+                    const [start, end] = gizmo_axes_suvl[i];
+                    const [s_start, s_end] = gizmo_axes_s[i];
+                    const are_both_vertices_in_front = (s_start > 0 && s_end > 0);
+                    if (!are_both_vertices_in_front) {
+                        continue; // skip edges with vertices behind camera
+                    }
+                    const is_start_vertex_inside_sensor = (
+                        start.x >= hypercamera_sensor_uvl_range[0] &&
+                        start.x <= hypercamera_sensor_uvl_range[1] &&
+                        start.y >= hypercamera_sensor_uvl_range[2] &&
+                        start.y <= hypercamera_sensor_uvl_range[3] &&
+                        start.z >= hypercamera_sensor_uvl_range[4] &&
+                        start.z <= hypercamera_sensor_uvl_range[5]
+                    );
+                    const is_end_vertex_inside_sensor = (
+                        end.x >= hypercamera_sensor_uvl_range[0] &&
+                        end.x <= hypercamera_sensor_uvl_range[1] &&
+                        end.y >= hypercamera_sensor_uvl_range[2] &&
+                        end.y <= hypercamera_sensor_uvl_range[3] &&
+                        end.z >= hypercamera_sensor_uvl_range[4] &&
+                        end.z <= hypercamera_sensor_uvl_range[5]
+                    );
+                    const are_both_vertices_inside_sensor = (
+                        is_start_vertex_inside_sensor &&
+                        is_end_vertex_inside_sensor
+                    );
+                    if (are_both_vertices_inside_sensor) {
+                        const points = [start, end];
+                        let material = gizmo_materials[i];
+                        const geometry = new THREE.BufferGeometry().setFromPoints(points);
+                        const line = new THREE.Line(geometry, material);
+                        scene.add(line);
+                        edgeMeshes.push(line);
+                    }
+                }
+
+            }
+        }
+
+        // Update the entire graph
+        function updateGraph() {
+            createThreeJSPrimitivesFromScene();
+        }
+
+        // Keyboard controls
+        const keys = {};
+        window.addEventListener('keydown', (e) => {
+            keys[e.key.toLowerCase()] = true;
+            // first interaction, for example used to vanish the title
+            on_first_user_interaction();
+            // Toggle keys (don't repeat on hold)
+            if (e.key.toLowerCase() == 'g') {
+                GIZMO_MODE = (GIZMO_MODE + 1) % 3; // cycle through gizmo modes
+            }
+            if (e.key.toLowerCase() == 'v') {
+                EXTRA_VIEWS = (EXTRA_VIEWS + 1) % 3; // toggle extra views
+            }
+            if (e.key.toLowerCase() == '.') {
+                SIMULATE_PHYSICS = true;
+                STEP_PHYSICS_ONCE = true;
+            }
+            if (e.key.toLowerCase() == ',') {
+                DEBUG_PHYSICS = !DEBUG_PHYSICS;
+                if (DEBUG_PHYSICS) {
+                    document.getElementById('physics-debug-container').style.display = 'flex';
+                } else {
+                    document.getElementById('physics-debug-container').style.display = 'none';
+                }
+            }
+            if (e.key.toLowerCase() == 'm') {
+                SIMULATE_PHYSICS = true;
+            }
+            if (e.key.toLowerCase() == 'x') {
+                UVL_VOXEL_Z_RASTERIZATION_MODE = !UVL_VOXEL_Z_RASTERIZATION_MODE;
+            }
+            if (e.key.toLowerCase() == 'h') {
+                SHOW_CONTROLS_HELP = !SHOW_CONTROLS_HELP;
+                if (SHOW_CONTROLS_HELP) {
+                    document.getElementById('help-controls').style.display = 'block';
+                } else {
+                    document.getElementById('help-controls').style.display = 'none';
+                }
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            keys[e.key.toLowerCase()] = false;
+        });
+
+        // Mouse controls for vertex selection
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        window.addEventListener('click', (event) => {
+            // Ignore clicks during drag
+            if (event.button !== 0) return;
+            
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(vertexMeshes);
+            
+            if (intersects.length > 0) {
+                const clickedMesh = intersects[0].object;
+                selectedVertexIndex = clickedMesh.selectable_idx;
+                document.getElementById('selected').textContent = `Vertex ${selectedVertexIndex}`;
+                updateGraph();
+            }
+        });
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Movement speed
+        const moveSpeed = 0.1;
+
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+
+            let moved = false;
+
+            // Simulate physics
+            for (let n = 0; n < 4; n++) { // substeps for stability
+                if (SIMULATE_PHYSICS) {
+                    moved = true;
+
+                    // debug log
+                    let html_physics_log = '';
+
+                    const FLOOR_STIFFNESS = 100;
+                    const FLOOR_DAMPING = 10;
+                    const GRAVITY = -9.81;
+                    const AIR_FRICTION_COEFFICIENT = 1.0;
+                    const FLOOR_SIDE_FRICTION_COEFFICIENT = 1;
+                    const dt = 0.016; // ~60fps
+
+                    html_physics_log += '<b>Sim Time:</b> ' + physics_time_s.toFixed(2) + ' s<br>';
+                    html_physics_log += '<b>UI Time:</b> ' + accumulated_animation_time_s.toFixed(2) + ' s<br>';
+
+                    for (let hyperobject of hyperscene_visible_objects) {
+                        if (hyperobject.simulate_physics) {
+
+                            html_physics_log += `<b>Object:</b> ${hyperobject.name}<br>`;
+
+                            // calculate hyperobject center of mass 
+                            let hyperobject_com = hyperobject.get_com();
+                            
+                            // mujoco-style forward/backward
+                            // 1. apply gravity
+                            // 2. apply collision to c.o.m based on vertices penetrating the floor (use z=-2 as the floor height)
+                            // 3. resolve c.o.m velocity and rotational velocity
+                            // 4. update vertex positions based on c.o.m and rotational velocity
+                            
+                            // force and torque accumulators
+                            let com_force = new Vector4D(0, 0, GRAVITY * hyperobject.mass, 0);
+                            let com_torque = {xy: 0, xz: 0, xw: 0, yz: 0, yw: 0, zw: 0};
+
+                            // If object com is within 1 unit of camera, push it away with small force
+                            let to_camera = hyperobject_com.subtract(hypercamera_T.origin());
+                            let distance_to_camera = Math.sqrt(to_camera.x**2 + to_camera.y**2 + to_camera.z**2 + to_camera.w**2);
+                            if (distance_to_camera < 2.0 && distance_to_camera > 0.01) {
+                                // let push_strength = 50 * (1.0 - distance_to_camera);
+                                let min_push_strength = 50;
+                                let max_push_strength = 500;
+                                let push_01 = (2.0 - distance_to_camera) / 2.0;
+                                let push_strength = min_push_strength + (max_push_strength - min_push_strength) * push_01;
+                                let push_direction = to_camera.multiply_by_scalar(1.0 / distance_to_camera); // normalize
+                                let push_force = push_direction.multiply_by_scalar(push_strength);
+                                com_force = com_force.add(push_force);
+                                // update mission variables
+                                user_has_pushed_object = true;
+                            }
+
+                            // Add a general friction force
+                            let friction_force = hyperobject.velocity_in_world.multiply_by_scalar(-AIR_FRICTION_COEFFICIENT);
+                            com_force = com_force.add(friction_force);
+
+                            // Add a general air friction rotational torque
+                            com_torque.xy += -AIR_FRICTION_COEFFICIENT * hyperobject.rotational_velocity.xy;
+                            com_torque.xz += -AIR_FRICTION_COEFFICIENT * hyperobject.rotational_velocity.xz;
+                            com_torque.xw += -AIR_FRICTION_COEFFICIENT * hyperobject.rotational_velocity.xw;
+                            com_torque.yz += -AIR_FRICTION_COEFFICIENT * hyperobject.rotational_velocity.yz;
+                            com_torque.yw += -AIR_FRICTION_COEFFICIENT * hyperobject.rotational_velocity.yw;
+                            com_torque.zw += -AIR_FRICTION_COEFFICIENT * hyperobject.rotational_velocity.zw;
+                            
+                            // 2. Check for collisions with floor and accumulate forces/torques
+                            for (let v of hyperobject.vertices_in_world) {
+                                let floor_height = floor_heightmap(v.x, v.y, v.w);
+                                let penetration = floor_height - v.z;
+                                if (penetration > 0) {
+                                    // Position relative to CoM
+                                    let r = v.subtract(hyperobject_com); // position relative to CoM
+                                    
+                                    // Calculate velocity of this vertex in world frame
+                                    let vertex_velocity = new Vector4D(0, 0, 0, 0);
+
+                                    // Linear velocity from CoM
+                                    vertex_velocity = vertex_velocity.add(hyperobject.velocity_in_world)
+
+                                    // Velocity due to rotation (v_rot = omega × r in 4D)
+                                    // too unstable
+                                    // let v_rot = new Vector4D(
+                                        // hyperobject.rotational_velocity.xy * r.y - hyperobject.rotational_velocity.xz * r.z - hyperobject.rotational_velocity.xw * r.w,
+                                        // -hyperobject.rotational_velocity.xy * r.x + hyperobject.rotational_velocity.yz * r.z + hyperobject.rotational_velocity.yw * r.w,
+                                        // hyperobject.rotational_velocity.xz * r.x - hyperobject.rotational_velocity.yz * r.y + hyperobject.rotational_velocity.zw * r.w,
+                                        // hyperobject.rotational_velocity.xw * r.x - hyperobject.rotational_velocity.yw * r.y - hyperobject.rotational_velocity.zw * r.z
+                                    // );
+                                    // vertex_velocity = vertex_velocity.add(v_rot);
+                                    
+                                    
+                                    
+                                    // Spring-damper force (normal direction only, z-axis)
+                                    let normal_force_z = FLOOR_STIFFNESS * penetration - FLOOR_DAMPING * vertex_velocity.z;
+                                    
+                                    let contact_force = new Vector4D(0, 0, normal_force_z, 0);
+
+                                    // Add side friction to contact force
+                                    let lateral_velocity = new Vector4D(vertex_velocity.x, vertex_velocity.y, 0, vertex_velocity.w);
+                                    let lateral_speed = Math.sqrt(lateral_velocity.x**2 + lateral_velocity.y**2 + lateral_velocity.w**2);
+                                    if (lateral_speed > 0.01) {
+                                        let lateral_direction = lateral_velocity.multiply_by_scalar(1.0 / lateral_speed); // normalize
+                                        let lateral_friction_magnitude = FLOOR_SIDE_FRICTION_COEFFICIENT * Math.abs(normal_force_z);
+                                        let lateral_friction = lateral_direction.multiply_by_scalar(-lateral_friction_magnitude);
+                                        contact_force = contact_force.add(lateral_friction);
+                                    }
+                                    
+                                    // Accumulate force on CoM
+                                    com_force = com_force.add(contact_force);
+
+                                    // Debug
+                                    if (v.z < -4) {
+                                        let aaa = 1;
+                                    }
+                                    
+                                    // Accumulate torque (r × F in 4D gives bivector with 6 components)
+                                    com_torque.xy += r.x * contact_force.y - r.y * contact_force.x;
+                                    com_torque.xz += r.x * contact_force.z - r.z * contact_force.x;
+                                    com_torque.xw += r.x * contact_force.w - r.w * contact_force.x;
+                                    com_torque.yz += r.y * contact_force.z - r.z * contact_force.y;
+                                    com_torque.yw += r.y * contact_force.w - r.w * contact_force.y;
+                                    com_torque.zw += r.z * contact_force.w - r.w * contact_force.z;
+                                }
+                            }
+
+
+                            const fmt = (n) => {
+                                let str = n.toFixed(3);
+                                str = (n < 0 ? str.slice(1) : str); // remove minus for padding
+                                str = str.padStart(8, '_');
+                                str = (n >= 0 ? '+' + str : '-' + str);
+                                return str
+                            };
+
+                            html_physics_log += `<table style="border-collapse: collapse; font-family: monospace;">`;
+                            html_physics_log += `<tr><th>Property</th><th>x</th><th>y</th><th>z</th><th>w</th><th></th><th></th></tr>`;
+                            html_physics_log += `<tr><td>Com Force</td><td>${fmt(com_force.x)}</td><td>${fmt(com_force.y)}</td><td>${fmt(com_force.z)}</td><td>${fmt(com_force.w)}</td><td></td><td></td></tr>`;
+                            html_physics_log += `<tr><td>Com Vel</td><td>${fmt(hyperobject.velocity_in_world.x)}</td><td>${fmt(hyperobject.velocity_in_world.y)}</td><td>${fmt(hyperobject.velocity_in_world.z)}</td><td>${fmt(hyperobject.velocity_in_world.w)}</td><td></td><td></td></tr>`;
+                            html_physics_log += `<tr><th></th><th>xy</th><th>xz</th><th>xw</th><th>yz</th><th>yw</th><th>zw</th></tr>`;
+                            html_physics_log += `<tr><td>Com Torque</td><td>${fmt(com_torque.xy)}</td><td>${fmt(com_torque.xz)}</td><td>${fmt(com_torque.xw)}</td><td>${fmt(com_torque.yz)}</td><td>${fmt(com_torque.yw)}</td><td>${fmt(com_torque.zw)}</td></tr>`;
+                            html_physics_log += `<tr><td>Com Ang Vel</td><td>${fmt(hyperobject.rotational_velocity.xy)}</td><td>${fmt(hyperobject.rotational_velocity.xz)}</td><td>${fmt(hyperobject.rotational_velocity.xw)}</td><td>${fmt(hyperobject.rotational_velocity.yz)}</td><td>${fmt(hyperobject.rotational_velocity.yw)}</td><td>${fmt(hyperobject.rotational_velocity.zw)}</td></tr>`;
+                            html_physics_log += `</table>`;
+                            
+                            // 3. Integrate velocities (simple Euler integration)
+                            
+                            // Linear velocity update: v += (F/m) * dt
+                            hyperobject.velocity_in_world = hyperobject.velocity_in_world.add(
+                                new Vector4D(
+                                    com_force.x / hyperobject.mass * dt,
+                                    com_force.y / hyperobject.mass * dt,
+                                    com_force.z / hyperobject.mass * dt,
+                                    com_force.w / hyperobject.mass * dt
+                                )
+                            );
+                            
+                            // Angular velocity update: omega += (torque / I) * dt
+                            // For uniform hyperobject with edge length 2: I = (2/3) * mass
+                            const I = (2/3) * hyperobject.mass;
+                            hyperobject.rotational_velocity.xy += (com_torque.xy / I) * dt;
+                            hyperobject.rotational_velocity.xz += (com_torque.xz / I) * dt;
+                            hyperobject.rotational_velocity.xw += (com_torque.xw / I) * dt;
+                            hyperobject.rotational_velocity.yz += (com_torque.yz / I) * dt;
+                            hyperobject.rotational_velocity.yw += (com_torque.yw / I) * dt;
+                            hyperobject.rotational_velocity.zw += (com_torque.zw / I) * dt;
+                            
+                            // 4. Update pose based on CoM velocity and rotation, update vertices
+                            // Update CoM position
+                            previous_pose = hyperobject.pose;
+                            // translate the pose matrix by velocity * dt
+                            hyperobject.pose.translate_self_by_delta(
+                                hyperobject.velocity_in_world.x * dt,
+                                hyperobject.velocity_in_world.y * dt,
+                                hyperobject.velocity_in_world.z * dt,
+                                hyperobject.velocity_in_world.w * dt,
+                                false
+                            );
+                            // rotate the pose matrix by rotational velocity * dt
+                            hyperobject.pose.rotate_self_by_delta('XY', hyperobject.rotational_velocity.xy * dt, false);
+                            hyperobject.pose.rotate_self_by_delta('XZ', hyperobject.rotational_velocity.xz * dt, false);
+                            hyperobject.pose.rotate_self_by_delta('XW', hyperobject.rotational_velocity.xw * dt, false);
+                            hyperobject.pose.rotate_self_by_delta('YZ', hyperobject.rotational_velocity.yz * dt, false);
+                            hyperobject.pose.rotate_self_by_delta('YW', hyperobject.rotational_velocity.yw * dt, false);
+                            hyperobject.pose.rotate_self_by_delta('ZW', hyperobject.rotational_velocity.zw * dt, false);
+                            // update vertices
+                            hyperobject.update_vertices_in_world();
+                        }
+                    }
+
+                    physics_time_s += dt;
+
+                    if (DEBUG_PHYSICS) {
+                        document.getElementById('physics-debug-text').innerHTML = html_physics_log;
+                    } else {
+                        document.getElementById('physics-debug-text').innerHTML = '';
+                    }
+
+                    if (STEP_PHYSICS_ONCE) {
+                        SIMULATE_PHYSICS = false;
+                        STEP_PHYSICS_ONCE = false;
+                    }
+                } // End of SIMULATE_PHYSICS
+            } // end of substeps
+
+            // Check Collected Objects
+            if (!user_has_collected_hypercube) {
+                // if the hypercube is within 2 units of the world origin, consider it collected
+                if (hypercube.pose.origin().subtract(gizmo_origin_in_world).magnitude() < 2.0) {
+                    user_has_collected_hypercube = true;
+                    hypercube_collection_time = physics_time_s;
+                    hyperscene_visible_objects = hyperscene_visible_objects.filter(obj => obj.name !== hypercube.name);
+                }
+            }
+            if (!user_has_collected_hyperpyramid) {
+                // if the hyperpyramid is within 2 units of the world origin, consider it collected
+                if (hyperpyramid.pose.origin().subtract(gizmo_origin_in_world).magnitude() < 2.0) {
+                    user_has_collected_hyperpyramid = true;
+                    hyperpyramid_collection_time = physics_time_s;
+                    hyperscene_visible_objects = hyperscene_visible_objects.filter(obj => obj.name !== hyperpyramid.name);
+                }
+            }
+            
+            // Handle WASD movement for selected vertex
+            if (true) {
+                
+                const RELATIVE_MOVEMENT = true;
+                if (keys['w']) {
+                    hypercamera_T.translate_self_by_delta(moveSpeed, 0, 0, 0, RELATIVE_MOVEMENT);
+                    moved = true;
+                }
+                if (keys['s']) {
+                    hypercamera_T.translate_self_by_delta(-moveSpeed, 0, 0, 0, RELATIVE_MOVEMENT);
+                    moved = true;
+                }
+                if (keys['a']) {
+                    hypercamera_T.translate_self_by_delta(0, moveSpeed, 0, 0, RELATIVE_MOVEMENT);
+                    moved = true;
+                }
+                if (keys['d']) {
+                    hypercamera_T.translate_self_by_delta(0,-moveSpeed, 0, 0, RELATIVE_MOVEMENT);
+                    moved = true;
+                }
+                if (keys['q']) {
+                    hypercamera_T.translate_self_by_delta(0, 0, 0, moveSpeed, RELATIVE_MOVEMENT);
+                    moved = true;
+                }
+                if (keys['e']) {
+                    hypercamera_T.translate_self_by_delta(0, 0, 0, -moveSpeed, RELATIVE_MOVEMENT);
+                    moved = true;
+                }
+                if (keys['r']) {
+                    hypercamera_T.translate_self_by_delta(0, 0, moveSpeed, 0, RELATIVE_MOVEMENT);
+                    moved = true;
+                }
+                if (keys['f']) {
+                    hypercamera_T.translate_self_by_delta(0, 0, -moveSpeed, 0, RELATIVE_MOVEMENT);
+                    moved = true;
+                }
+                // reset camera z to 0
+                hypercamera_T.matrix[2][4] = floor_heightmap(
+                    hypercamera_T.matrix[0][4],
+                    hypercamera_T.matrix[1][4],
+                    hypercamera_T.matrix[3][4]
+                ) + hypercamera_height_above_ground;
+
+                if (keys['i']) {
+                    hypercamera_T.rotate_self_by_delta('XZ', 0.05, RELATIVE_MOVEMENT);
+                    moved = true;
+                }
+                if (keys['k']) {
+                    hypercamera_T.rotate_self_by_delta('XZ', -0.05, RELATIVE_MOVEMENT);
+                    moved = true;
+                }
+                if (keys['j']) {
+                    hypercamera_T.rotate_self_by_delta('XY', 0.05, false);
+                    moved = true;
+                }
+                if (keys['l']) {
+                    hypercamera_T.rotate_self_by_delta('XY', -0.05, false);
+                    moved = true;
+                }
+                if (keys['u']) {
+                    hypercamera_T.rotate_self_by_delta('XW', 0.05, false);
+                    moved = true;
+                }
+                if (keys['o']) {
+                    hypercamera_T.rotate_self_by_delta('XW', -0.05, false);
+                    moved = true;
+                }
+                if (keys['y']) {
+                    hypercamera_T.rotate_self_by_delta('YW', -0.05, false);
+                    moved = true;
+                }
+                if (keys['p']) {
+                    hypercamera_T.rotate_self_by_delta('YW', 0.05, false);
+                    moved = true;
+                }
+
+                if (keys['1'] || keys['2'] || keys['0']) {
+                    // Look at the selected vertex
+                    // camera x axis is now normalized vector from camera to vertex
+                    // camera z axis should now be on the plane composed by the new x axis and the world z axis
+                    // 
+                        // ---- Step 1: compute z ----
+                    let lookAt_in_world = gizmo_axes_in_world[0][0]; // origin
+                    if (keys['0']) {
+                    } else {
+                        let hyperobject_idx = keys['1'] ? 0 : 1;
+                        lookAt_in_world = hyperscene_visible_objects[hyperobject_idx].get_com();
+                    }
+                    let worldZ = new Vector4D(0, 0, 1, 0);
+                    // new camera x axis
+                    let x = lookAt_in_world.subtract(hypercamera_T.origin()).normalize();
+                    let zProj = x.multiply_by_scalar(worldZ.dot(x));
+                    let zPrime = worldZ.subtract(zProj);
+                    let z = zPrime.normalize();
+
+                    // ---- Step 2: compute w ----
+                    // We want the camera w vector to be as close as possible to the world w axis
+                    // Otherwise the camera feels "fragged" in the usual xyz axes
+                    // let vW = new Vector4D(0, 0, 0, 1); // world w axis
+                    // Or we pick the current camera w, seems more robust
+                    let vW = new Vector4D(hypercamera_T.matrix[3][0], hypercamera_T.matrix[3][1], hypercamera_T.matrix[3][2], hypercamera_T.matrix[3][3]);
+
+                    let wPrime = vW
+                        .subtract(x.multiply_by_scalar(vW.dot(x)))
+                        .subtract(z.multiply_by_scalar(vW.dot(z)));
+                    let w = wPrime.normalize();
+
+                    // ---- Step 3: compute y ----
+                    // pick a vector not colinear with x, z
+                    // let vY = new Vector4D(0, 1, 0, 0);
+                    // pick the current y axis of the camera
+                    let vY = new Vector4D(hypercamera_T.matrix[1][0], hypercamera_T.matrix[1][1], hypercamera_T.matrix[1][2], hypercamera_T.matrix[1][3]);
+
+                    let yPrime = vY
+                        .subtract(x.multiply_by_scalar(vY.dot(x)))
+                        .subtract(z.multiply_by_scalar(vY.dot(z)))
+                        .subtract(w.multiply_by_scalar(vY.dot(w)));
+                    let y = yPrime.normalize();
+
+
+                    const PROGRESSIVE_ROTATION_TO_TARGET = true;
+
+                    // matrix = [x y z w]
+                    if (!PROGRESSIVE_ROTATION_TO_TARGET) {
+                    hypercamera_T.matrix[0][0] = x.x; hypercamera_T.matrix[0][1] = y.x; hypercamera_T.matrix[0][2] = z.x; hypercamera_T.matrix[0][3] = w.x;
+                    hypercamera_T.matrix[1][0] = x.y; hypercamera_T.matrix[1][1] = y.y; hypercamera_T.matrix[1][2] = z.y; hypercamera_T.matrix[1][3] = w.y;
+                    hypercamera_T.matrix[2][0] = x.z; hypercamera_T.matrix[2][1] = y.z; hypercamera_T.matrix[2][2] = z.z; hypercamera_T.matrix[2][3] = w.z;
+                    hypercamera_T.matrix[3][0] = x.w; hypercamera_T.matrix[3][1] = y.w; hypercamera_T.matrix[3][2] = z.w; hypercamera_T.matrix[3][3] = w.w;
+                    }
+
+                    if (PROGRESSIVE_ROTATION_TO_TARGET) {
+                        // interpolate towards the solution
+
+                        // Matrix operations
+                        function matrixMultiply(A, B) {
+                            const n = A.length;
+                            const result = Array(n).fill(0).map(() => Array(n).fill(0));
+                            
+                            for (let i = 0; i < n; i++) {
+                                for (let j = 0; j < n; j++) {
+                                    for (let k = 0; k < n; k++) {
+                                        result[i][j] += A[i][k] * B[k][j];
+                                    }
+                                }
+                            }
+                            return result;
+                        }
+
+                        function matrixTranspose(M) {
+                            const n = M.length;
+                            const result = Array(n).fill(0).map(() => Array(n).fill(0));
+                            
+                            for (let i = 0; i < n; i++) {
+                                for (let j = 0; j < n; j++) {
+                                    result[i][j] = M[j][i];
+                                }
+                            }
+                            return result;
+                        }
+
+                        // Simple method: Linear interpolation + SVD orthogonalization
+                        function interpolateRotation4D_Simple(R0, R1, t) {
+                            const n = 4;
+                            const R_interp = Array(n).fill(0).map(() => Array(n).fill(0));
+                            
+                            // Linear interpolation
+                            for (let i = 0; i < n; i++) {
+                                for (let j = 0; j < n; j++) {
+                                    R_interp[i][j] = (1 - t) * R0[i][j] + t * R1[i][j];
+                                }
+                            }
+                            
+                            // Re-orthogonalize using Gram-Schmidt
+                            return gramSchmidt4D(R_interp);
+                        }
+
+                        // Gram-Schmidt orthogonalization for 4D matrices
+                        function gramSchmidt4D(M) {
+                            const result = M.map(row => [...row]);
+                            
+                            for (let i = 0; i < 4; i++) {
+                                // Subtract projections onto previous vectors
+                                for (let j = 0; j < i; j++) {
+                                    const dot = dotProduct4D(result[i], result[j]);
+                                    for (let k = 0; k < 4; k++) {
+                                        result[i][k] -= dot * result[j][k];
+                                    }
+                                }
+                                
+                                // Normalize
+                                const norm = Math.sqrt(dotProduct4D(result[i], result[i]));
+                                for (let k = 0; k < 4; k++) {
+                                    result[i][k] /= norm;
+                                }
+                            }
+                            
+                            return result;
+                        }
+
+                        function dotProduct4D(v1, v2) {
+                            return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2] + v1[3]*v2[3];
+                        }
+
+
+                        // More accurate method using matrix logarithm (exponential map)
+                        function matrixLog(M) {
+                            // For rotation matrices, use series expansion
+                            // log(R) = (R - R^T)/2 + higher order terms for small rotations
+                            const n = 4;
+                            const MT = matrixTranspose(M);
+                            const skew = Array(n).fill(0).map(() => Array(n).fill(0));
+                            
+                            // First approximation: (M - M^T)/2
+                            for (let i = 0; i < n; i++) {
+                                for (let j = 0; j < n; j++) {
+                                    skew[i][j] = (M[i][j] - MT[i][j]) / 2;
+                                }
+                            }
+                            
+                            // For better accuracy with larger rotations, use series expansion
+                            // This is a simplified version
+                            return skew;
+                        }
+
+                        function matrixExp(M) {
+                            const n = 4;
+                            let result = Array(n).fill(0).map((_, i) => 
+                                Array(n).fill(0).map((_, j) => i === j ? 1 : 0)
+                            );
+                            
+                            let term = result.map(row => [...row]);
+                            
+                            // Series expansion: exp(M) = I + M + M^2/2! + M^3/3! + ...
+                            for (let k = 1; k <= 20; k++) {
+                                term = matrixMultiply(term, M);
+                                const factorial = factorial_memo(k);
+                                
+                                for (let i = 0; i < n; i++) {
+                                    for (let j = 0; j < n; j++) {
+                                        result[i][j] += term[i][j] / factorial;
+                                    }
+                                }
+                            }
+                            
+                            return result;
+                        }
+
+                        function factorial_memo(n) {
+                            let result = 1;
+                            for (let i = 2; i <= n; i++) result *= i;
+                            return result;
+                        }
+
+                        function interpolateRotation4D_Geodesic(R0, R1, t) {
+                            // Compute R1 * R0^T
+                            const R0T = matrixTranspose(R0);
+                            const R_rel = matrixMultiply(R1, R0T);
+                            
+                            // Compute log(R_rel)
+                            const log_R = matrixLog(R_rel);
+                            
+                            // Scale by t
+                            const scaled_log = log_R.map(row => row.map(val => val * t));
+                            
+                            // Compute exp(t * log_R)
+                            const exp_tlog = matrixExp(scaled_log);
+                            
+                            // Multiply by R0
+                            return matrixMultiply(exp_tlog, R0);
+                        }
+
+                        // Example usage:
+                        const from_R = [
+                            [hypercamera_T.matrix[0][0], hypercamera_T.matrix[0][1], hypercamera_T.matrix[0][2], hypercamera_T.matrix[0][3]],
+                            [hypercamera_T.matrix[1][0], hypercamera_T.matrix[1][1], hypercamera_T.matrix[1][2], hypercamera_T.matrix[1][3]],
+                            [hypercamera_T.matrix[2][0], hypercamera_T.matrix[2][1], hypercamera_T.matrix[2][2], hypercamera_T.matrix[2][3]],
+                            [hypercamera_T.matrix[3][0], hypercamera_T.matrix[3][1], hypercamera_T.matrix[3][2], hypercamera_T.matrix[3][3]]
+                        ];
+
+                        const to_R = [
+                            [x.x, y.x, z.x, w.x],
+                            [x.y, y.y, z.y, w.y],
+                            [x.z, y.z, z.z, w.z],
+                            [x.w, y.w, z.w, w.w]
+                        ];
+
+
+                        // simple method
+                        const interpolated_R = interpolateRotation4D_Simple(from_R, to_R, 0.3);
+                        // Geodesic method (more accurate, especially for large rotations)
+                        // const interpolated_R = interpolateRotation4D_Geodesic(from_R, to_R, 0.3);
+
+                        // Update hypercamera_T with interpolated rotation
+                        hypercamera_T.matrix[0][0] = interpolated_R[0][0]; hypercamera_T.matrix[0][1] = interpolated_R[0][1]; hypercamera_T.matrix[0][2] = interpolated_R[0][2]; hypercamera_T.matrix[0][3] = interpolated_R[0][3];
+                        hypercamera_T.matrix[1][0] = interpolated_R[1][0]; hypercamera_T.matrix[1][1] = interpolated_R[1][1]; hypercamera_T.matrix[1][2] = interpolated_R[1][2]; hypercamera_T.matrix[1][3] = interpolated_R[1][3];
+                        hypercamera_T.matrix[2][0] = interpolated_R[2][0]; hypercamera_T.matrix[2][1] = interpolated_R[2][1]; hypercamera_T.matrix[2][2] = interpolated_R[2][2]; hypercamera_T.matrix[2][3] = interpolated_R[2][3];
+                        hypercamera_T.matrix[3][0] = interpolated_R[3][0]; hypercamera_T.matrix[3][1] = interpolated_R[3][1]; hypercamera_T.matrix[3][2] = interpolated_R[3][2]; hypercamera_T.matrix[3][3] = interpolated_R[3][3];
+                    }
+
+                    
+                    moved=true
+
+                }
+
+            }
+
+            // Check wether camera is inverted (camera z axis dot product with world z axis < 0)
+            let is_camera_inverted = (hypercamera_T.matrix[2][2] < 0);
+            // document.getElementById('warning-camera-inverted').innerHTML = hypercamera_T.matrix[2][2];
+            if (is_camera_inverted) {
+                // change warning-div text to "Camera is inverted"
+                document.getElementById('warning-camera-inverted').innerText = "Warning: Camera is inverted";
+            } else {
+                document.getElementById('warning-camera-inverted').innerText = "";
+            }
+
+            // display warning when physics is paused
+            if (!SIMULATE_PHYSICS) {
+                document.getElementById('warning-physics-paused').innerText = "[PHYSICS PAUSED] (press m to resume)";
+            } else {
+                document.getElementById('warning-physics-paused').innerText = "";
+            }
+
+            // display mission
+            update_mission();
+            
+            // update threejs scene since hyperscene has changed
+            if (moved) {
+                updateGraph();
+            }
+
+            controls.update();
+            renderer.render(scene, camera);
+            if (EXTRA_VIEWS === 1 || EXTRA_VIEWS === 2) {
+                document.getElementById('projection-container').style.display = 'flex';
+                xzRenderer.render(xzScene, xzCamera);
+                yzRenderer.render(yzScene, yzCamera);
+                wzRenderer.render(wzScene, wzCamera);
+            } else {
+                document.getElementById('projection-container').style.display = 'none';
+            }
+            if (EXTRA_VIEWS === 2) {
+                // make sure div is visible
+                document.getElementById('additional-projection-container').style.display = 'flex';
+                ywRenderer.render(ywScene, ywCamera);
+                xwRenderer.render(xwScene, xwCamera);
+                xyRenderer.render(xyScene, xyCamera);
+            } else {
+                document.getElementById('additional-projection-container').style.display = 'none';
+            }
+
+            // Update animation time
+            anim_dt = performance.now() - last_anim_end_time;
+            if (anim_dt > 0) { accumulated_animation_time_s += anim_dt / 1000.0; }
+            last_anim_end_time = performance.now();
+
+        } // end of animate()
+
+        // Initialize
+        updateGraph();
+        document.getElementById('selected').textContent = `Vertex ${selectedVertexIndex}`;
+        animate();
+    </script>
+</body>
+</html>

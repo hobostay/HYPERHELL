@@ -1,0 +1,3838 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Bargain</title>
+<style>
+body {
+  margin: 0;
+  padding: 20px;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #1a1a1a;
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+}
+canvas {
+  border: 2px solid #444;
+  background: #000;
+  max-width: 100%;
+}
+.controls {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.control-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+label {
+  font-size: 12px;
+  color: #aaa;
+}
+input[type="range"] {
+  width: 150px;
+}
+.info {
+  font-size: 14px;
+  color: #888;
+  text-align: center;
+}
+.help {
+  display: none;
+}
+.loading {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-family: 'Arial', monospace;
+  font-size: 24px;
+  color: #fff;
+  border: 3px solid #fff;
+  padding: 20px 40px;
+  background-color: rgba(0, 0, 0, 0.8);
+  z-index: 9999;
+}
+</style>
+</head>
+<body>
+<canvas id="canvas" width="600" height="600"></canvas>
+<div class="help" id="help-div"> </div> <!-- Stops hyperengine from creating help div -->
+<!-- Floating div that says loading -->
+<div class="loading" id="loading-div"><b>LOADING...</b></div>
+<script type="module">
+
+import { Transform4D, Vector4D } from '../../4d_creatures/hyperengine/transform4d.js';
+import { createHypercube } from '../../4d_creatures/hyperengine/hyperobject.js';
+import { TheBargainManager } from '../game_manager/the_bargain_manager.js';
+import { runHyperengine } from '../../4d_creatures/hyperengine/hyperengine.js';
+import { createHyperwall, createHyperwallWithCenterHole, createSphericalWallWithHole, createSphericalBridge, createObstacleCube  } from '../models/wall.js';
+import { createCorridorTube, createCorridorTubeWithHole } from '../models/corridor.js';
+import { createHypersphere } from '../../4d_creatures/models/hypersphere.js';
+import { createHypercrab } from '../../4d_creatures/models/hypercrab.js';
+import { createBargainer } from '../models/bargainer.js';
+import { createGem } from '../models/gem.js';
+
+let objects = [];
+
+const APPLY_TEXTURES = true;
+
+// Procedural brick wall texture generator
+function generateBrickWallTexture() {
+    const USIZE = 128; // horizontal (maps to wall y)
+    const VSIZE = 96;  // vertical (maps to wall z / height)
+    const WSIZE = 128; // 4th dim (maps to wall w)
+
+    const texture = new Uint32Array(USIZE * VSIZE * WSIZE);
+
+    // Hash function for per-texel noise
+    function hash(x, y, z) {
+        let h = ((x * 374761393 + y * 668265263 + z * 1274126177) | 0);
+        h = ((h ^ (h >> 13)) * 1103515245 + 12345) | 0;
+        return (h & 0x7fffffff) / 0x7fffffff; // [0, 1]
+    }
+
+    // Dark grey brick base colors
+    const brickBases = [
+        [55, 55, 55],
+        [48, 50, 52],
+        [62, 58, 56],
+        [42, 44, 48],
+        [52, 48, 53],
+        [60, 56, 52],
+        [45, 49, 50],
+        [58, 54, 50],
+        [50, 52, 56],
+    ];
+    const mortarBase = [5, 5, 5]; // near-black mortar
+
+    // Brick dimensions in texels
+    const brickH = 10;  // brick height in v
+    const mortarH = 3;  // mortar thickness in v
+    const brickW = 28;  // brick width in u
+    const mortarW = 3;  // mortar thickness in u
+    const brickD = 28;  // brick depth in w
+    const mortarD = 3;  // mortar thickness in w
+    const rowPeriodV = brickH + mortarH; // 13
+    const colPeriodU = brickW + mortarW; // 31
+    const colPeriodW = brickD + mortarD; // 31
+
+    // Per-brick color hash
+    function brickColorIdx(a, b, c) {
+        return Math.abs(((a * 73 + b * 157 + c * 37) * 2654435761) | 0) % brickBases.length;
+    }
+
+    for (let w = 0; w < WSIZE; w++) {
+        for (let v = 0; v < VSIZE; v++) {
+            for (let u = 0; u < USIZE; u++) {
+                let index = u + v * USIZE + w * USIZE * VSIZE;
+
+                // Horizontal mortar
+                let rowInCycle = v % rowPeriodV;
+                let isHMortar = rowInCycle >= brickH;
+                let rowIdx = Math.floor(v / rowPeriodV);
+
+                // U-direction mortar
+                let uOffset = (rowIdx % 2 === 0) ? 0 : Math.floor(colPeriodU / 2);
+                let colInCycleU = (u + uOffset) % colPeriodU;
+                let isUMortar = colInCycleU >= brickW;
+
+                // W-direction mortar
+                let wOffset = (rowIdx % 2 === 0) ? 0 : Math.floor(colPeriodW / 2);
+                let colInCycleW = (w + wOffset) % colPeriodW;
+                let isWMortar = colInCycleW >= brickD;
+
+                let r, g, b;
+                let isMortar = isHMortar || isUMortar || isWMortar;
+
+                if (isMortar) {
+                    // Mortar with slight noise
+                    let n = hash(u, v, w) * 8 - 4;
+                    r = Math.max(0, Math.min(255, mortarBase[0] + n));
+                    g = Math.max(0, Math.min(255, mortarBase[1] + n));
+                    b = Math.max(0, Math.min(255, mortarBase[2] + n));
+                } else {
+                    // Per-brick base color
+                    let brickU = Math.floor((u + uOffset) / colPeriodU);
+                    let brickWi = Math.floor((w + wOffset) / colPeriodW);
+                    let ci = brickColorIdx(rowIdx, brickU, brickWi);
+                    let base = brickBases[ci];
+
+                    // Per-brick tint shift (consistent within a brick)
+                    let brickSeed = hash(brickU * 7 + 31, rowIdx * 13 + 53, brickWi * 19 + 71);
+                    let tintShift = (brickSeed - 0.5) * 16;
+
+                    // Per-texel noise for surface grain
+                    let grain = (hash(u, v, w) - 0.5) * 20;
+
+                    // Subtle edge darkening near mortar lines
+                    let distToHMortar = Math.min(rowInCycle, brickH - 1 - rowInCycle);
+                    let distToUMortar = Math.min(colInCycleU, brickW - 1 - colInCycleU);
+                    let distToWMortar = Math.min(colInCycleW, brickD - 1 - colInCycleW);
+                    let edgeDist = Math.min(distToHMortar, distToUMortar, distToWMortar);
+                    let edgeDarken = edgeDist <= 1 ? -10 : 0;
+
+                    // Occasional darker splotch (stain)
+                    let stain = hash(u ^ 0x55, v ^ 0xAA, w ^ 0x33);
+                    let stainDarken = stain < 0.08 ? -15 : 0;
+
+                    r = Math.max(0, Math.min(255, base[0] + tintShift + grain + edgeDarken + stainDarken));
+                    g = Math.max(0, Math.min(255, base[1] + tintShift + grain + edgeDarken + stainDarken));
+                    b = Math.max(0, Math.min(255, base[2] + tintShift + grain + edgeDarken + stainDarken));
+                }
+
+                let rgba_u32 = (255 << 24) | (b << 16) | (g << 8) | r;
+                texture[index] = rgba_u32;
+            }
+        }
+    }
+
+    return { texture, texture_info: { USIZE, VSIZE, WSIZE } };
+}
+
+// Dark texture with red glowing eye pairs at semi-random positions
+function generateDarkEyesTexture() {
+    const USIZE = 128;
+    const VSIZE = 96;
+    const WSIZE = 128;
+    const texture = new Uint32Array(USIZE * VSIZE * WSIZE);
+
+    function hash(x, y, z) {
+        let h = ((x * 374761393 + y * 668265263 + z * 1274126177) | 0);
+        h = ((h ^ (h >> 13)) * 1103515245 + 12345) | 0;
+        return (h & 0x7fffffff) / 0x7fffffff;
+    }
+
+    // Generate eye pair positions using hash for semi-random placement
+    const eyePairs = [];
+    const numPairs = 16;
+    for (let i = 0; i < numPairs; i++) {
+        const cu = 14 + hash(i * 7 + 3, 1, 0) * (USIZE - 28);
+        const cv = 14 + hash(2, i * 13 + 7, 0) * (VSIZE - 28);
+        const cw = hash(0, 3, i * 19 + 11) * WSIZE;
+        const spacing = 4 + hash(i * 3, i * 5, i * 7) * 3; // 4-7 texels between eyes
+        const eyeRadU = 2.5 + hash(i * 11, i * 17, 4) * 1.5; // U radius: 2.5-4
+        const eyeRadV = eyeRadU * 2.5; // aspect correction so eyes look round on wall
+        const eyeRadW = 15 + hash(i * 23, 5, i * 29) * 20;  // large W extent: 15-35
+
+        eyePairs.push({
+            u1: cu - spacing, u2: cu + spacing,
+            v: cv, w: cw,
+            radU: eyeRadU, radV: eyeRadV, radW: eyeRadW
+        });
+    }
+
+    for (let w = 0; w < WSIZE; w++) {
+        for (let v = 0; v < VSIZE; v++) {
+            for (let u = 0; u < USIZE; u++) {
+                const index = u + v * USIZE + w * USIZE * VSIZE;
+
+                // Near-black base with subtle noise
+                const n = hash(u, v, w);
+                const base = 3 + n * 9;
+                let r = base, g = base, b = base;
+
+                // Check proximity to any eye
+                let maxGlow = 0;
+                for (const pair of eyePairs) {
+                    for (const eu of [pair.u1, pair.u2]) {
+                        const du = (u - eu) / pair.radU;
+                        const dv = (v - pair.v) / pair.radV;
+                        // W wraps around for seamless tiling
+                        let dw_raw = Math.abs(w - pair.w);
+                        if (dw_raw > WSIZE / 2) dw_raw = WSIZE - dw_raw;
+                        const dw = dw_raw / pair.radW;
+
+                        const dist2 = du * du + dv * dv + dw * dw;
+                        if (dist2 < 1.0) {
+                            const intensity = 1.0 - Math.sqrt(dist2);
+                            const glow = intensity * intensity;
+                            maxGlow = Math.max(maxGlow, glow);
+                        }
+                    }
+                }
+
+                if (maxGlow > 0) {
+                    r = Math.max(r, 40 + maxGlow * 215);
+                    g = Math.min(g, 3 + maxGlow * 10);
+                    b = Math.min(b, 2);
+                }
+
+                r = Math.max(0, Math.min(255, Math.round(r)));
+                g = Math.max(0, Math.min(255, Math.round(g)));
+                b = Math.max(0, Math.min(255, Math.round(b)));
+
+                texture[index] = (255 << 24) | (b << 16) | (g << 8) | r;
+            }
+        }
+    }
+
+    return { texture, texture_info: { USIZE, VSIZE, WSIZE } };
+}
+const darkEyesTex = generateDarkEyesTexture();
+
+// Metal pipes converging toward center hole
+// Concentric square rings (L-inf distance) with alternating pipe direction per ring
+function generateMetalPipesTexture() {
+    const USIZE = 128;
+    const VSIZE = 96;
+    const WSIZE = 128;
+    const texture = new Uint32Array(USIZE * VSIZE * WSIZE);
+
+    function hash(x, y, z) {
+        let h = ((x * 374761393 + y * 668265263 + z * 1274126177) | 0);
+        h = ((h ^ (h >> 13)) * 1103515245 + 12345) | 0;
+        return (h & 0x7fffffff) / 0x7fffffff;
+    }
+
+    const pipePeriod = 4;    // center-to-center spacing in u-w plane
+    const vPipePeriod = 4;   // center-to-center spacing in v (height) direction
+    const pipeRadius = 1.6;  // pipe cross-section radius (used for both directions)
+    const ringWidth = 12;    // L-inf ring width before direction alternates (~3 pipes per ring)
+    const segLen = 10;       // length of each random pipe segment block along axis
+
+    // Max L-inf distance from center (for gradient)
+    const maxDist = Math.max(USIZE, WSIZE) / 2;
+
+    for (let w = 0; w < WSIZE; w++) {
+        for (let v = 0; v < VSIZE; v++) {
+            for (let u = 0; u < USIZE; u++) {
+                const index = u + v * USIZE + w * USIZE * VSIZE;
+
+                const cu = u - USIZE / 2;
+                const cw = w - WSIZE / 2;
+
+                // L-inf distance gives concentric square rings
+                const linfDist = Math.max(Math.abs(cu), Math.abs(cw));
+                const ring = Math.floor(linfDist / ringWidth);
+
+                // Dark-to-light gradient: bright near center, dark at edges
+                const gradientT = Math.min(1.0, linfDist / maxDist);
+                const gradient = 1.0 - gradientT * gradientT; // quadratic falloff
+
+                // Alternating pipe direction per ring
+                // Even rings: pipes run along u (axis), spaced in w (perp)
+                // Odd rings: pipes run along w (axis), spaced in u (perp)
+                let perpCoord, axisCoord;
+                if (ring % 2 === 0) {
+                    perpCoord = cw;
+                    axisCoord = cu;
+                } else {
+                    perpCoord = cu;
+                    axisCoord = cw;
+                }
+
+                // Which pipe are we near? (in u-w plane)
+                const pipeIdx = Math.floor((perpCoord + 1000 * pipePeriod) / pipePeriod);
+                const pipePhase = ((perpCoord % pipePeriod) + pipePeriod) % pipePeriod;
+                const perpDist = Math.abs(pipePhase - pipePeriod / 2);
+
+                // Which pipe row in v?
+                const vPipeIdx = Math.floor((v + 1000 * vPipePeriod) / vPipePeriod);
+                const vPipePhase = ((v % vPipePeriod) + vPipePeriod) % vPipePeriod;
+                const vPerpDist = Math.abs(vPipePhase - vPipePeriod / 2);
+
+                // Combined cylindrical distance (circular cross-section in perp x v)
+                const combinedDist = Math.sqrt(
+                    (perpDist / pipeRadius) * (perpDist / pipeRadius) +
+                    (vPerpDist / pipeRadius) * (vPerpDist / pipeRadius)
+                );
+
+                // Random pipe segments along axis
+                const segIdx = Math.floor((axisCoord + 1000 * segLen) / segLen);
+                const segPresent = hash(pipeIdx, segIdx, ring * 7 + vPipeIdx * 19 + 3) > 0.08;
+
+                const n = hash(u, v, w);
+                let r, g, b;
+
+                // Per-pipe color seed
+                const pipeColorSeed = hash(pipeIdx * 23 + vPipeIdx * 37, ring * 41, 99);
+                const vNorm = v / VSIZE;
+                const vWarmth = vNorm * 0.3 + pipeColorSeed * 0.15;
+
+                if (combinedDist < 1.0 && segPresent) {
+                    // On a pipe segment - combinedDist 0=center, 1=edge
+                    const t = combinedDist;
+
+                    // Cylindrical shading
+                    const shade = Math.cos(t * Math.PI * 0.5);
+                    const shade2 = shade * shade;
+
+                    const baseIntensity = 30 + shade2 * 140;
+                    r = baseIntensity * (0.82 + vWarmth) + n * 8;
+                    g = baseIntensity * (0.88 + vWarmth * 0.3) + n * 6;
+                    b = baseIntensity * (1.02 - vWarmth * 0.4) + n * 5;
+
+                    // End-caps: darken near segment boundaries (axis direction)
+                    const posInSeg = ((axisCoord % segLen) + segLen) % segLen;
+                    if (posInSeg < 1.0 || posInSeg > segLen - 1.0) {
+                        r *= 0.5; g *= 0.5; b *= 0.5;
+                    }
+
+                    // Edge shadow
+                    if (t > 0.75) {
+                        const edgeFade = (t - 0.75) / 0.25;
+                        r *= (1.0 - edgeFade * 0.6);
+                        g *= (1.0 - edgeFade * 0.6);
+                        b *= (1.0 - edgeFade * 0.6);
+                    }
+
+                } else {
+                    // Dark gap / missing pipe segment
+                    r = 4 + n * 4;
+                    g = 5 + n * 4;
+                    b = 8 + n * 3;
+                }
+
+                // Ring boundary seam (darker line where pipe direction changes)
+                const ringPos = linfDist % ringWidth;
+                if (ringPos < 0.7 || ringPos > ringWidth - 0.7) {
+                    r = r * 0.5 + 12;
+                    g = g * 0.5 + 14;
+                    b = b * 0.5 + 20;
+                }
+
+                // Apply dark-to-light gradient (bright near center hole)
+                const gradMin = 0.15; // don't go fully black at edges
+                const gradMul = gradMin + gradient * (1.0 - gradMin);
+                r *= gradMul;
+                g *= gradMul;
+                b *= gradMul;
+
+                // Additive orange glow very close to center (on top of gradient)
+                if (linfDist < 16) {
+                    const glowIntensity = (1.0 - linfDist / 16);
+                    const glow2 = glowIntensity * glowIntensity;
+                    r = Math.min(255, r + glow2 * 140);
+                    g = Math.min(255, g + glow2 * 50);
+                    b = Math.min(255, b + glow2 * 10);
+                }
+
+                r = Math.max(0, Math.min(255, Math.round(r)));
+                g = Math.max(0, Math.min(255, Math.round(g)));
+                b = Math.max(0, Math.min(255, Math.round(b)));
+
+                texture[index] = (255 << 24) | (b << 16) | (g << 8) | r;
+            }
+        }
+    }
+
+    return { texture, texture_info: { USIZE, VSIZE, WSIZE } };
+}
+
+// Corridor 6 dark metal pipes texture
+// Inspired by room2 W- pipes, but darker with edge lighting and vignette.
+function generateCorridor6PipesTexture() {
+    const USIZE = 128;
+    const VSIZE = 96;
+    const WSIZE = 128;
+    const texture = new Uint32Array(USIZE * VSIZE * WSIZE);
+
+    function hash(x, y, z) {
+        let h = ((x * 374761393 + y * 668265263 + z * 1274126177) | 0);
+        h = ((h ^ (h >> 13)) * 1103515245 + 12345) | 0;
+        return (h & 0x7fffffff) / 0x7fffffff;
+    }
+
+    const pipePeriod = 5;
+    const vPipePeriod = 4;
+    const pipeRadius = 1.7;
+    const ringWidth = 12;
+    const segLen = 10;
+    const uHalf = USIZE / 2;
+    const vHalf = VSIZE / 2;
+    const wHalf = WSIZE / 2;
+    const maxLinf = Math.max(uHalf, wHalf);
+
+    for (let w = 0; w < WSIZE; w++) {
+        for (let v = 0; v < VSIZE; v++) {
+            for (let u = 0; u < USIZE; u++) {
+                const idx = u + v * USIZE + w * USIZE * VSIZE;
+                const cu = u - uHalf;
+                const cw = w - wHalf;
+                const cv = v - vHalf;
+
+                const linf = Math.max(Math.abs(cu), Math.abs(cw));
+                const ring = Math.floor(linf / ringWidth);
+
+                let perpCoord, axisCoord;
+                if (ring % 2 === 0) {
+                    perpCoord = cw;
+                    axisCoord = cu;
+                } else {
+                    perpCoord = cu;
+                    axisCoord = cw;
+                }
+
+                const pipeIdx = Math.floor((perpCoord + 1000 * pipePeriod) / pipePeriod);
+                const pipePhase = ((perpCoord % pipePeriod) + pipePeriod) % pipePeriod;
+                const perpDist = Math.abs(pipePhase - pipePeriod / 2);
+
+                const vPipeIdx = Math.floor((v + 1000 * vPipePeriod) / vPipePeriod);
+                const vPipePhase = ((v % vPipePeriod) + vPipePeriod) % vPipePeriod;
+                const vPerpDist = Math.abs(vPipePhase - vPipePeriod / 2);
+
+                const combined = Math.sqrt(
+                    (perpDist / pipeRadius) * (perpDist / pipeRadius) +
+                    (vPerpDist / pipeRadius) * (vPerpDist / pipeRadius)
+                );
+
+                const segIdx = Math.floor((axisCoord + 1000 * segLen) / segLen);
+                const segPresent = hash(pipeIdx, segIdx, ring * 13 + vPipeIdx * 17 + 11) > 0.10;
+                const n = hash(u, v, w);
+
+                let r = 6 + n * 4;
+                let g = 7 + n * 4;
+                let b = 10 + n * 5;
+
+                if (combined < 1.0 && segPresent) {
+                    const t = combined;
+                    const shade = Math.cos(t * Math.PI * 0.5);
+                    const shade2 = shade * shade;
+
+                    const base = 18 + shade2 * 90;
+                    r = base * 0.90 + n * 6;
+                    g = base * 0.95 + n * 5;
+                    b = base * 1.05 + n * 4;
+
+                    const posInSeg = ((axisCoord % segLen) + segLen) % segLen;
+                    if (posInSeg < 1.0 || posInSeg > segLen - 1.0) {
+                        r *= 0.55; g *= 0.55; b *= 0.55;
+                    }
+
+                    if (t > 0.76) {
+                        const edgeFade = (t - 0.76) / 0.24;
+                        r *= (1.0 - edgeFade * 0.55);
+                        g *= (1.0 - edgeFade * 0.55);
+                        b *= (1.0 - edgeFade * 0.55);
+                    }
+                }
+
+                // Dark seams between directional rings.
+                const ringPos = linf % ringWidth;
+                if (ringPos < 0.65 || ringPos > ringWidth - 0.65) {
+                    r = r * 0.58 + 4;
+                    g = g * 0.58 + 5;
+                    b = b * 0.58 + 7;
+                }
+
+                // Corridor-style lighting: dark at far edges, subtle highlights near center.
+                const radial = Math.sqrt((cu / uHalf) * (cu / uHalf) + (cw / wHalf) * (cw / wHalf));
+                const vignette = Math.max(0, 1.0 - radial * 0.85);
+                const centerGlow = Math.max(0, 1.0 - radial * 1.35);
+                const topShade = 1.0 - Math.min(1.0, Math.abs(cv) / vHalf) * 0.28;
+                const linfNorm = Math.min(1.0, linf / maxLinf);
+                const edgeDark = 1.0 - linfNorm * 0.55;
+
+                const lightMul = (0.30 + vignette * 0.55) * topShade * edgeDark;
+                r *= lightMul;
+                g *= lightMul;
+                b *= lightMul;
+
+                // Cool metallic highlight on center-facing surfaces.
+                const spec = centerGlow * centerGlow;
+                r += spec * 18;
+                g += spec * 22;
+                b += spec * 30;
+
+                r = Math.max(0, Math.min(255, Math.round(r)));
+                g = Math.max(0, Math.min(255, Math.round(g)));
+                b = Math.max(0, Math.min(255, Math.round(b)));
+                texture[idx] = (255 << 24) | (b << 16) | (g << 8) | r;
+            }
+        }
+    }
+
+    return { texture, texture_info: { USIZE, VSIZE, WSIZE } };
+}
+
+// Room 4 biocircuit texture
+// Dark red wafer base with metal circuitry traces and localized lighting.
+function generateRoom4BioCircuitTexture() {
+    const USIZE = 160;
+    const VSIZE = 96;
+    const WSIZE = 96;
+    const texture = new Uint32Array(USIZE * VSIZE * WSIZE);
+
+    function hash(x, y, z) {
+        let h = ((x * 374761393 + y * 668265263 + z * 1274126177) | 0);
+        h = ((h ^ (h >> 13)) * 1103515245 + 12345) | 0;
+        return (h & 0x7fffffff) / 0x7fffffff;
+    }
+
+    function smoothHash(x, y, z) {
+        const x0 = Math.floor(x), x1 = x0 + 1, xf = x - x0;
+        const y0 = Math.floor(y), y1 = y0 + 1, yf = y - y0;
+        const z0 = Math.floor(z), z1 = z0 + 1, zf = z - z0;
+        const sx = xf * xf * (3 - 2 * xf);
+        const sy = yf * yf * (3 - 2 * yf);
+        const sz = zf * zf * (3 - 2 * zf);
+        const n000 = hash(x0, y0, z0), n100 = hash(x1, y0, z0);
+        const n010 = hash(x0, y1, z0), n110 = hash(x1, y1, z0);
+        const n001 = hash(x0, y0, z1), n101 = hash(x1, y0, z1);
+        const n011 = hash(x0, y1, z1), n111 = hash(x1, y1, z1);
+        const nx00 = n000 + (n100 - n000) * sx;
+        const nx10 = n010 + (n110 - n010) * sx;
+        const nx01 = n001 + (n101 - n001) * sx;
+        const nx11 = n011 + (n111 - n011) * sx;
+        const nxy0 = nx00 + (nx10 - nx00) * sy;
+        const nxy1 = nx01 + (nx11 - nx01) * sy;
+        return nxy0 + (nxy1 - nxy0) * sz;
+    }
+
+    const tracePeriodA = 10;
+    const tracePeriodB = 20;
+    const traceHalfA = 1.1;
+    const traceHalfB = 1.8;
+    const viaPeriod = 14;
+    const lightSpacing = 30;
+    const lightRadius = 20;
+    const uHalf = USIZE / 2;
+    const vHalf = VSIZE / 2;
+    const wHalf = WSIZE / 2;
+
+    for (let w = 0; w < WSIZE; w++) {
+        for (let v = 0; v < VSIZE; v++) {
+            for (let u = 0; u < USIZE; u++) {
+                const idx = u + v * USIZE + w * USIZE * VSIZE;
+                const n = hash(u, v, w);
+
+                // Deep red wafer substrate.
+                const wafer1 = smoothHash(u / 9, v / 7, w / 9);
+                const wafer2 = smoothHash(u / 22 + 43, v / 15 + 71, w / 22 + 113) * 0.6;
+                const wafer = (wafer1 + wafer2) / 1.6;
+                let r = 14 + wafer * 48 + n * 5;
+                let g = 3 + wafer * 12 + n * 2;
+                let b = 4 + wafer * 10 + n * 2;
+
+                const dUa = Math.abs((u % tracePeriodA) - tracePeriodA / 2);
+                const dWa = Math.abs((w % tracePeriodA) - tracePeriodA / 2);
+                const dUb = Math.abs(((u + 3) % tracePeriodB) - tracePeriodB / 2);
+                const dWb = Math.abs(((w + 7) % tracePeriodB) - tracePeriodB / 2);
+                const dA = Math.min(dUa, dWa);
+                const dB = Math.min(dUb, dWb);
+
+                let lineA = Math.max(0, 1.0 - dA / traceHalfA);
+                let lineB = Math.max(0, 1.0 - dB / traceHalfB) * 0.85;
+                let trace = Math.max(lineA, lineB);
+
+                // Randomly cut traces to avoid fully regular grid.
+                const segKeep = hash(Math.floor(u / 6), Math.floor(v / 5) + 17, Math.floor(w / 6) + 31) > 0.14 ? 1.0 : 0.0;
+                trace *= segKeep;
+
+                if (trace > 0.0) {
+                    const metal = 20 + trace * 90 + n * 6;
+                    r = r * (1.0 - trace * 0.85) + metal * 0.88;
+                    g = g * (1.0 - trace * 0.85) + metal * 0.95;
+                    b = b * (1.0 - trace * 0.85) + metal * 1.08;
+                }
+
+                // Blood halo around traces gives "biocircuit" look.
+                const halo = Math.max(0, 1.0 - Math.min(dA, dB) / 3.4);
+                r += halo * 28;
+                g += halo * 3;
+                b += halo * 4;
+
+                // Sparse vias/intersections.
+                const dV = Math.abs((v % viaPeriod) - viaPeriod / 2);
+                const viaLine = Math.max(0, 1.0 - dV / 1.1);
+                const inter = Math.min(1.0, lineA * lineB * 1.6);
+                let via = inter * viaLine;
+                if (via > 0.35) {
+                    via *= hash(Math.floor(u / tracePeriodB), Math.floor(v / viaPeriod), Math.floor(w / tracePeriodB)) > 0.45 ? 1.0 : 0.0;
+                } else {
+                    via = 0.0;
+                }
+                r += via * 26;
+                g += via * 34;
+                b += via * 46;
+
+                // Dark-edge corridor lighting with periodic highlights.
+                const edgeU = Math.abs(u - uHalf) / uHalf;
+                const edgeW = Math.abs(w - wHalf) / wHalf;
+                const edge = Math.max(edgeU, edgeW);
+                const edgeShade = 1.0 / (1.0 + 2.6 * edge * edge);
+                const vShade = 1.0 - Math.min(1.0, Math.abs(v - vHalf) / vHalf) * 0.30;
+                const radial = Math.sqrt(edgeU * edgeU + edgeW * edgeW);
+                const core = Math.max(0, 1.0 - radial * 0.95);
+
+                const baseLight = 0.42 + edgeShade * 0.46;
+                r *= baseLight * vShade;
+                g *= baseLight * vShade;
+                b *= baseLight * vShade;
+
+                const nearestLightU = Math.round(u / lightSpacing) * lightSpacing;
+                const du = u - nearestLightU;
+                const dv = v - vHalf;
+                const dw = w - wHalf;
+                const dist = Math.sqrt(du * du + dv * dv + dw * dw);
+                const lightBright = Math.max(0, 1.0 - dist / lightRadius);
+                const lightIntensity = lightBright * lightBright;
+
+                r += lightIntensity * (18 + trace * 22 + halo * 14);
+                g += lightIntensity * (8 + trace * 24);
+                b += lightIntensity * (10 + trace * 28);
+
+                const spec = core * core;
+                r += spec * (6 + trace * 12);
+                g += spec * (8 + trace * 16);
+                b += spec * (12 + trace * 22);
+
+                r = Math.max(0, Math.min(255, Math.round(r)));
+                g = Math.max(0, Math.min(255, Math.round(g)));
+                b = Math.max(0, Math.min(255, Math.round(b)));
+                texture[idx] = (255 << 24) | (b << 16) | (g << 8) | r;
+            }
+        }
+    }
+
+    return { texture, texture_info: { USIZE, VSIZE, WSIZE } };
+}
+
+// Room 5 volcanic rock texture
+// Obsidian/dark-brown stone with emissive lava cracks and cave-like lighting.
+function generateRoom5RockTexture() {
+    const USIZE = 160;
+    const VSIZE = 96;
+    const WSIZE = 128;
+    const texture = new Uint32Array(USIZE * VSIZE * WSIZE);
+
+    function hash(x, y, z) {
+        let h = ((x * 374761393 + y * 668265263 + z * 1274126177) | 0);
+        h = ((h ^ (h >> 13)) * 1103515245 + 12345) | 0;
+        return (h & 0x7fffffff) / 0x7fffffff;
+    }
+
+    function smoothHash(x, y, z) {
+        const x0 = Math.floor(x), x1 = x0 + 1, xf = x - x0;
+        const y0 = Math.floor(y), y1 = y0 + 1, yf = y - y0;
+        const z0 = Math.floor(z), z1 = z0 + 1, zf = z - z0;
+        const sx = xf * xf * (3 - 2 * xf);
+        const sy = yf * yf * (3 - 2 * yf);
+        const sz = zf * zf * (3 - 2 * zf);
+        const n000 = hash(x0, y0, z0), n100 = hash(x1, y0, z0);
+        const n010 = hash(x0, y1, z0), n110 = hash(x1, y1, z0);
+        const n001 = hash(x0, y0, z1), n101 = hash(x1, y0, z1);
+        const n011 = hash(x0, y1, z1), n111 = hash(x1, y1, z1);
+        const nx00 = n000 + (n100 - n000) * sx;
+        const nx10 = n010 + (n110 - n010) * sx;
+        const nx01 = n001 + (n101 - n001) * sx;
+        const nx11 = n011 + (n111 - n011) * sx;
+        const nxy0 = nx00 + (nx10 - nx00) * sy;
+        const nxy1 = nx01 + (nx11 - nx01) * sy;
+        return nxy0 + (nxy1 - nxy0) * sz;
+    }
+
+    const uHalf = USIZE / 2;
+    const vHalf = VSIZE / 2;
+    const wHalf = WSIZE / 2;
+    const crackP1 = 23;
+    const crackP2 = 29;
+    const crackP3 = 31;
+    const lightSpacing = 36;
+    const lightRadius = 24;
+
+    for (let w = 0; w < WSIZE; w++) {
+        for (let v = 0; v < VSIZE; v++) {
+            for (let u = 0; u < USIZE; u++) {
+                const idx = u + v * USIZE + w * USIZE * VSIZE;
+
+                const n = hash(u, v, w);
+                const n1 = smoothHash(u / 6, v / 5, w / 6);
+                const n2 = smoothHash(u / 15 + 41, v / 12 + 71, w / 15 + 113) * 0.6;
+                const n3 = smoothHash(u / 30 + 151, v / 24 + 181, w / 30 + 199) * 0.35;
+                const rock = (n1 + n2 + n3) / 1.95;
+
+                // Base dark volcanic rock.
+                let r = 14 + rock * 36 + n * 5;
+                let g = 10 + rock * 24 + n * 4;
+                let b = 12 + rock * 20 + n * 4;
+
+                // Obsidian zones: darker, slightly cooler tint.
+                const obs = smoothHash(u / 18 + 13, v / 14 + 29, w / 18 + 47);
+                if (obs > 0.62) {
+                    const t = (obs - 0.62) / 0.38;
+                    r = r * (1.0 - 0.55 * t) + 10 * t;
+                    g = g * (1.0 - 0.55 * t) + 10 * t;
+                    b = b * (1.0 - 0.40 * t) + 16 * t;
+                }
+
+                // Crack network from intersecting warped line fields.
+                const d1 = Math.abs(((u + Math.floor(w / 8) * 3) % crackP1) - crackP1 / 2);
+                const d2 = Math.abs(((w + Math.floor(u / 10) * 5) % crackP2) - crackP2 / 2);
+                const d3 = Math.abs(((u + w + Math.floor(v / 6) * 2) % crackP3) - crackP3 / 2);
+                const crackDist = Math.min(d1, d2 * 1.08, d3 * 0.95);
+                let crack = Math.max(0, 1.0 - crackDist / 1.15);
+
+                // Break long cracks into segments.
+                const segKeep = hash(Math.floor(u / 7), Math.floor(v / 5) + 17, Math.floor(w / 7) + 31);
+                crack *= segKeep > 0.20 ? 1.0 : 0.0;
+
+                // Warm lava core + halo around cracks.
+                const halo = Math.max(0, 1.0 - crackDist / 3.8);
+                if (halo > 0) {
+                    r += halo * 26;
+                    g += halo * 8;
+                    b += halo * 3;
+                }
+                if (crack > 0) {
+                    const lava = crack * crack;
+                    r += lava * 155;
+                    g += lava * 55;
+                    b += lava * 8;
+                }
+
+                // Cave lighting: darker at edges, subtle central lift + periodic warm pools.
+                const edgeU = Math.abs(u - uHalf) / uHalf;
+                const edgeW = Math.abs(w - wHalf) / wHalf;
+                const edge = Math.max(edgeU, edgeW);
+                const edgeMul = 1.0 / (1.0 + 3.1 * edge * edge);
+                const vMul = 1.0 - Math.min(1.0, Math.abs(v - vHalf) / vHalf) * 0.25;
+                const radial = Math.sqrt(edgeU * edgeU + edgeW * edgeW);
+                const core = Math.max(0, 1.0 - radial * 1.05);
+
+                const baseLight = 0.36 + edgeMul * 0.52;
+                r *= baseLight * vMul;
+                g *= baseLight * vMul;
+                b *= baseLight * vMul;
+
+                const nearestLightU = Math.round(u / lightSpacing) * lightSpacing;
+                const du = u - nearestLightU;
+                const dv = v - vHalf;
+                const dw = w - wHalf;
+                const dist = Math.sqrt(du * du + dv * dv + dw * dw);
+                const light = Math.max(0, 1.0 - dist / lightRadius);
+                const light2 = light * light;
+
+                // Warm pools amplify nearby lava cracks.
+                r += light2 * (14 + crack * 30 + halo * 8);
+                g += light2 * (7 + crack * 12);
+                b += light2 * (4 + crack * 4);
+
+                // Subtle glossy obsidian specular.
+                const spec = core * core * (obs > 0.62 ? 1.0 : 0.4);
+                r += spec * 6;
+                g += spec * 7;
+                b += spec * 10;
+
+                r = Math.max(0, Math.min(255, Math.round(r)));
+                g = Math.max(0, Math.min(255, Math.round(g)));
+                b = Math.max(0, Math.min(255, Math.round(b)));
+                texture[idx] = (255 << 24) | (b << 16) | (g << 8) | r;
+            }
+        }
+    }
+
+    return { texture, texture_info: { USIZE, VSIZE, WSIZE } };
+}
+
+// Obsidian checker texture for bridges/monoliths.
+// Regular dark checkerboard with glossy highlights.
+function generateObsidianCheckerTexture(withGem = false) {
+    const USIZE = 96;
+    const VSIZE = 96;
+    const WSIZE = 96;
+    const texture = new Uint32Array(USIZE * VSIZE * WSIZE);
+
+    function hash(x, y, z) {
+        let h = ((x * 374761393 + y * 668265263 + z * 1274126177) | 0);
+        h = ((h ^ (h >> 13)) * 1103515245 + 12345) | 0;
+        return (h & 0x7fffffff) / 0x7fffffff;
+    }
+
+    const step = 10;
+    const uHalf = USIZE / 2;
+    const vHalf = VSIZE / 2;
+    const wHalf = WSIZE / 2;
+    const lightSpacing = 28;
+    const lightRadius = 20;
+
+    for (let w = 0; w < WSIZE; w++) {
+        for (let v = 0; v < VSIZE; v++) {
+            for (let u = 0; u < USIZE; u++) {
+                const idx = u + v * USIZE + w * USIZE * VSIZE;
+                const n = hash(u, v, w);
+
+                const checker = ((Math.floor(u / step) + Math.floor(v / step) + Math.floor(w / step)) % 2) === 0;
+                let r = checker ? 18 : 9;
+                let g = checker ? 17 : 9;
+                let b = checker ? 24 : 13;
+
+                // Tiny noise so checker pattern is not perfectly flat.
+                r += n * 4;
+                g += n * 3;
+                b += n * 5;
+
+                // Edge lines between tiles.
+                const uIn = u % step;
+                const vIn = v % step;
+                const wIn = w % step;
+                const nearEdge = (uIn === 0 || vIn === 0 || wIn === 0);
+                if (nearEdge) {
+                    r *= 0.78; g *= 0.78; b *= 0.82;
+                }
+
+                const edgeU = Math.abs(u - uHalf) / uHalf;
+                const edgeW = Math.abs(w - wHalf) / wHalf;
+                const edge = Math.max(edgeU, edgeW);
+                const edgeLight = 1.0 / (1.0 + 2.8 * edge * edge);
+                const vLight = 1.0 - Math.min(1.0, Math.abs(v - vHalf) / vHalf) * 0.22;
+                const lightMul = (0.34 + edgeLight * 0.55) * vLight;
+                r *= lightMul;
+                g *= lightMul;
+                b *= lightMul;
+
+                // Sparse cool specular for obsidian sheen.
+                const sparkle = hash(Math.floor(u / 3) * 3 + 101, Math.floor(v / 3) * 3 + 211, Math.floor(w / 3) * 3 + 307);
+                if (sparkle > 0.965) {
+                    const s = (sparkle - 0.965) / 0.035;
+                    r += s * 24;
+                    g += s * 28;
+                    b += s * 36;
+                }
+
+                // Localized light pools.
+                const nearestLightU = Math.round(u / lightSpacing) * lightSpacing;
+                const du = u - nearestLightU;
+                const dv = v - vHalf;
+                const dw = w - wHalf;
+                const dist = Math.sqrt(du * du + dv * dv + dw * dw);
+                const lp = Math.max(0, 1.0 - dist / lightRadius);
+                const lp2 = lp * lp;
+                r += lp2 * 12;
+                g += lp2 * 14;
+                b += lp2 * 20;
+
+                if (withGem) {
+                    // Purple emissive cracks in obsidian (instead of a central gem).
+                    // Multiple line fields keep cracks visible in XW and YW slices.
+                    const c1 = Math.abs(((u + Math.floor(w / 7) * 2) % 19) - 9.5);
+                    const c2 = Math.abs(((w + Math.floor(v / 6) * 3) % 23) - 11.5);
+                    const c3 = Math.abs(((v + Math.floor(u / 8) * 2) % 17) - 8.5);
+                    const crackDist = Math.min(c1, c2 * 1.05, c3 * 0.95);
+                    let crack = Math.max(0, 1.0 - crackDist / 1.15);
+
+                    // Break continuous lines into jagged segments.
+                    const segKeep = hash(Math.floor(u / 6) + 31, Math.floor(v / 5) + 47, Math.floor(w / 6) + 59);
+                    crack *= segKeep > 0.30 ? 1.0 : 0.0;
+
+                    // Keep most crack length dark (non-emissive).
+                    if (crack > 0) {
+                        const darkCrack = crack * 0.35;
+                        r *= (1.0 - darkCrack * 0.45);
+                        g *= (1.0 - darkCrack * 0.45);
+                        b *= (1.0 - darkCrack * 0.35);
+                    }
+
+                    // Large slice-friendly random patches:
+                    // each mask ignores one axis so XW/YW/UV slices all show purple regions.
+                    const patchXW = hash(Math.floor(u / 20) + 13, 0, Math.floor(w / 20) + 29);
+                    const patchYW = hash(0, Math.floor(v / 20) + 71, Math.floor(w / 20) + 83);
+                    const patchUV = hash(Math.floor(u / 22) + 101, Math.floor(v / 22) + 131, 0);
+                    let patch = Math.max(
+                        Math.max(0, (patchXW - 0.54) / 0.46),
+                        Math.max(0, (patchYW - 0.54) / 0.46),
+                        Math.max(0, (patchUV - 0.56) / 0.44)
+                    );
+                    patch = patch * patch;
+
+                    const emissive = crack * patch;
+                    if (emissive > 0) {
+                        const glow = emissive * emissive;
+                        const halo = Math.max(0, 1.0 - crackDist / 3.0) * patch;
+                        r += halo * 14 + glow * 185;
+                        g += halo * 4 + glow * 28;
+                        b += halo * 30 + glow * 255;
+                    }
+                }
+
+                r = Math.max(0, Math.min(255, Math.round(r)));
+                g = Math.max(0, Math.min(255, Math.round(g)));
+                b = Math.max(0, Math.min(255, Math.round(b)));
+                texture[idx] = (255 << 24) | (b << 16) | (g << 8) | r;
+            }
+        }
+    }
+
+    return { texture, texture_info: { USIZE, VSIZE, WSIZE } };
+}
+
+// Falling corridor texture - alternating light/dark rings along u (fall direction)
+// Dark metal at top, reddish rings, lighter metal at bottom, orange glow at entrance
+function generateFallingCorridorTexture() {
+    const USIZE = 512; // high res along fall direction
+    const VSIZE = 32;
+    const WSIZE = 32;
+    const texture = new Uint32Array(USIZE * VSIZE * WSIZE);
+
+    function hash(x, y, z) {
+        let h = ((x * 374761393 + y * 668265263 + z * 1274126177) | 0);
+        h = ((h ^ (h >> 13)) * 1103515245 + 12345) | 0;
+        return (h & 0x7fffffff) / 0x7fffffff;
+    }
+
+    const ringPeriod = 16; // texels per ring cycle (light + dark pair)
+
+    // Pseudo-random smooth noise for bloodstain clouds (value noise)
+    function smoothHash(x, y, z) {
+        const x0 = Math.floor(x), x1 = x0 + 1, xf = x - x0;
+        const y0 = Math.floor(y), y1 = y0 + 1, yf = y - y0;
+        const z0 = Math.floor(z), z1 = z0 + 1, zf = z - z0;
+        const sx = xf * xf * (3 - 2 * xf);
+        const sy = yf * yf * (3 - 2 * yf);
+        const sz = zf * zf * (3 - 2 * zf);
+        const n000 = hash(x0, y0, z0), n100 = hash(x1, y0, z0);
+        const n010 = hash(x0, y1, z0), n110 = hash(x1, y1, z0);
+        const n001 = hash(x0, y0, z1), n101 = hash(x1, y0, z1);
+        const n011 = hash(x0, y1, z1), n111 = hash(x1, y1, z1);
+        const nx00 = n000 + (n100 - n000) * sx;
+        const nx10 = n010 + (n110 - n010) * sx;
+        const nx01 = n001 + (n101 - n001) * sx;
+        const nx11 = n011 + (n111 - n011) * sx;
+        const nxy0 = nx00 + (nx10 - nx00) * sy;
+        const nxy1 = nx01 + (nx11 - nx01) * sy;
+        return nxy0 + (nxy1 - nxy0) * sz;
+    }
+
+    // Pre-compute bloodstain intensity for each texel
+    // Streaks run along u (fall direction), with cloudy shape in v/w cross-section
+    const bloodMap = new Float32Array(USIZE * VSIZE * WSIZE);
+    for (let w = 0; w < WSIZE; w++) {
+        for (let v = 0; v < VSIZE; v++) {
+            for (let u = 0; u < USIZE; u++) {
+                // Low-frequency noise stretched along u for longitudinal streaks
+                const n1 = smoothHash(u / 40, v / 3.5, w / 3.5);
+                const n2 = smoothHash(u / 20 + 50, v / 5 + 30, w / 5 + 30) * 0.5;
+                const n3 = smoothHash(u / 80 + 100, v / 6 + 60, w / 6 + 60) * 0.3;
+                let blood = (n1 + n2 + n3) / 1.8;
+                // Threshold to create distinct stain shapes
+                blood = Math.max(0, (blood - 0.42) / 0.58);
+                blood = blood * blood;
+                bloodMap[u + v * USIZE + w * USIZE * VSIZE] = blood;
+            }
+        }
+    }
+
+    for (let w = 0; w < WSIZE; w++) {
+        for (let v = 0; v < VSIZE; v++) {
+            for (let u = 0; u < USIZE; u++) {
+                const index = u + v * USIZE + w * USIZE * VSIZE;
+
+                const n = hash(u, v, w);
+
+                // Gradual gradient along u: 0=top of fall (light metal), 1=bottom (dark metal)
+                const uNorm = 1.0 - u / USIZE;
+                const gradientBase = 0.2 + uNorm * 0.6;
+
+                // Alternating rings: sinusoidal for smooth bands
+                const ringPhase = (u / ringPeriod) * 2 * Math.PI;
+                const ringWave = Math.sin(ringPhase) * 0.5 + 0.5; // 0 to 1
+
+                // Light rings are brighter, dark rings are dimmer
+                const ringBrightness = 0.3;
+
+                // Combined brightness
+                const brightness = gradientBase * ringBrightness;
+
+                // Base metal color: dark gunmetal at top, lighter brushed steel at bottom
+                let r = brightness * (155 + uNorm * 50) + n * 5;
+                let g = brightness * (145 + uNorm * 55) + n * 4;
+                let b = brightness * (160 + uNorm * 35) + n * 3;
+
+                // Reddish tint on ring bright-bands
+
+                // Subtle edge lines at ring boundaries (where sin crosses zero)
+                const ringCross = Math.abs(Math.sin(ringPhase));
+                if (ringCross < 0.12) {
+                    const edgeFactor = 1.0 - (1.0 - ringCross / 0.12) * 0.45;
+                    r *= edgeFactor;
+                    g *= edgeFactor;
+                    b *= edgeFactor;
+                }
+
+                // Bloodstain streaks - dark red cloudy patches along fall direction
+                const blood = bloodMap[index];
+                if (blood > 0) {
+                    // Shift towards dark red/maroon
+                    r = r * (1 - blood * 0.5) + blood * 90;
+                    g = g * (1 - blood * 0.85);
+                    b = b * (1 - blood * 0.85);
+                }
+
+                // Dark gradient towards cross-section edges (darken corners)
+                const vEdge = Math.abs(v - VSIZE / 2) / (VSIZE / 2); // 0 at center, 1 at edge
+                const wEdge = Math.abs(w - WSIZE / 2) / (WSIZE / 2);
+                const edgeDist = Math.max(vEdge, wEdge); // box distance to edge
+                const cornerDarken = 1 / (1 + 3*edgeDist * edgeDist);
+                r *= cornerDarken;
+                g *= cornerDarken;
+                b *= cornerDarken;
+
+                // Localized spherical orange glow near top-center entrance
+                const glowRadius = 0.5;
+                const du = u/USIZE - 0;
+                const dv = v/VSIZE - 1/2;
+                const dw = w/VSIZE - 1/2;
+                const glowDist = Math.sqrt(du * du + dv * dv + dw * dw);
+                if (glowDist < glowRadius) {
+                    const glowIntensity = (1.0 - glowDist / glowRadius);
+                    const glow2 = glowIntensity * glowIntensity;
+                    r = Math.min(255, r + glow2 * 200);
+                    g = Math.min(255, g + glow2 * 50);
+                    b = Math.min(255, b + glow2 * 12);
+                }
+
+                r = Math.max(0, Math.min(255, Math.round(r)));
+                g = Math.max(0, Math.min(255, Math.round(g)));
+                b = Math.max(0, Math.min(255, Math.round(b)));
+
+                texture[index] = (255 << 24) | (b << 16) | (g << 8) | r;
+            }
+        }
+    }
+
+    return { texture, texture_info: { USIZE, VSIZE, WSIZE } };
+}
+const fallTex = generateFallingCorridorTexture();
+
+// Flesh wall with thin metal grating overlay
+// Reddish noisy flesh base, thin regularly-spaced metal grate lines
+function generateFleshGrateTexture() {
+    const USIZE = 128;
+    const VSIZE = 64;
+    const WSIZE = 24;
+    const texture = new Uint32Array(USIZE * VSIZE * WSIZE);
+
+    function hash(x, y, z) {
+        let h = ((x * 374761393 + y * 668265263 + z * 1274126177) | 0);
+        h = ((h ^ (h >> 13)) * 1103515245 + 12345) | 0;
+        return (h & 0x7fffffff) / 0x7fffffff;
+    }
+
+    function smoothHash(x, y, z) {
+        const x0 = Math.floor(x), x1 = x0 + 1, xf = x - x0;
+        const y0 = Math.floor(y), y1 = y0 + 1, yf = y - y0;
+        const z0 = Math.floor(z), z1 = z0 + 1, zf = z - z0;
+        const sx = xf * xf * (3 - 2 * xf);
+        const sy = yf * yf * (3 - 2 * yf);
+        const sz = zf * zf * (3 - 2 * zf);
+        const n000 = hash(x0, y0, z0), n100 = hash(x1, y0, z0);
+        const n010 = hash(x0, y1, z0), n110 = hash(x1, y1, z0);
+        const n001 = hash(x0, y0, z1), n101 = hash(x1, y0, z1);
+        const n011 = hash(x0, y1, z1), n111 = hash(x1, y1, z1);
+        const nx00 = n000 + (n100 - n000) * sx;
+        const nx10 = n010 + (n110 - n010) * sx;
+        const nx01 = n001 + (n101 - n001) * sx;
+        const nx11 = n011 + (n111 - n011) * sx;
+        const nxy0 = nx00 + (nx10 - nx00) * sy;
+        const nxy1 = nx01 + (nx11 - nx01) * sy;
+        return nxy0 + (nxy1 - nxy0) * sz;
+    }
+
+    const grateSpacing = 8; // texels between grate bars
+    const grateWidth = 1;   // thin, 1 texel wide
+
+    // Baked tube-like lights, repeated along corridor axis.
+    const lightSpacing = 32;
+    const lightRadius = 18;
+    const lightW1 = WSIZE * 0.30;
+    const lightW2 = WSIZE * 0.70;
+    const lightV = VSIZE * 0.86; // near top of wall in Z
+
+    for (let w = 0; w < WSIZE; w++) {
+        for (let v = 0; v < VSIZE; v++) {
+            for (let u = 0; u < USIZE; u++) {
+                const index = u + v * USIZE + w * USIZE * VSIZE;
+                const n = hash(u, v, w);
+
+                // Check if this texel is on a grate bar
+                const onGrateU = (u % grateSpacing) < grateWidth;
+                const onGrateV = (v % grateSpacing) < grateWidth;
+                const onGrateW = (w % grateSpacing) < grateWidth;
+
+                let r, g, b;
+
+                if (onGrateU || onGrateV || onGrateW) {
+                    // Thin metal grate bar
+                    const metalBase = 40 + n * 20;
+                    r = metalBase;
+                    g = metalBase + 2;
+                    b = metalBase + 5;
+                } else {
+                    // Fleshy base: multi-octave reddish noise
+                    const n1 = smoothHash(u / 5, v / 5, w / 4);
+                    const n2 = smoothHash(u / 10 + 50, v / 10 + 50, w / 8 + 50) * 0.6;
+                    const n3 = smoothHash(u / 2.5 + 100, v / 2.5 + 100, w / 3 + 100) * 0.3;
+                    const flesh = (n1 + n2 + n3) / 1.9;
+
+                    // Reddish-pink with variation (darker base)
+                    r = 30 + flesh * 60 + n * 8;
+                    g = 8 + flesh * 18 + n * 4;
+                    b = 6 + flesh * 12 + n * 3;
+
+                    // Some darker vein-like patches
+                    const vein = smoothHash(u / 3 + 200, v / 7 + 200, w / 3 + 200);
+                    if (vein > 0.7) {
+                        const veinStr = (vein - 0.7) / 0.3;
+                        r *= (1 - veinStr * 0.4);
+                        g *= (1 - veinStr * 0.3);
+                        b *= (1 - veinStr * 0.2);
+                    }
+                }
+
+                // Baked lighting contribution (repeating along u, two side tubes)
+                const nearestLightU = Math.round(u / lightSpacing) * lightSpacing;
+                const du = u - nearestLightU;
+                const dv = v - lightV;
+                const dw1 = w - lightW1;
+                const dw2 = w - lightW2;
+                const dist1 = Math.sqrt(du * du + dv * dv + dw1 * dw1);
+                const dist2 = Math.sqrt(du * du + dv * dv + dw2 * dw2);
+                const light1 = Math.max(0, 1.0 - dist1 / lightRadius);
+                const light2 = Math.max(0, 1.0 - dist2 / lightRadius);
+                const lightIntensity = Math.min(1.0, light1 * light1 + light2 * light2);
+
+                // Apply light: warm flesh tone near lights
+                r = r * (1.0 + lightIntensity * 2.2);
+                g = g * (1.0 + lightIntensity * 0.95);
+                b = b * (1.0 + lightIntensity * 0.45);
+
+                // Baked edge darkening (corridor corners).
+                const vEdge = Math.abs(v - VSIZE / 2) / (VSIZE / 2);
+                const wEdge = Math.abs(w - WSIZE / 2) / (WSIZE / 2);
+                const edge = Math.max(vEdge, wEdge);
+                const cornerDark = 1.0 / (1.0 + 2.8 * edge * edge);
+                r *= cornerDark;
+                g *= cornerDark;
+                b *= cornerDark;
+
+                r = Math.max(0, Math.min(255, Math.round(r)));
+                g = Math.max(0, Math.min(255, Math.round(g)));
+                b = Math.max(0, Math.min(255, Math.round(b)));
+
+                texture[index] = (255 << 24) | (b << 16) | (g << 8) | r;
+            }
+        }
+    }
+
+    return { texture, texture_info: { USIZE, VSIZE, WSIZE } };
+}
+const fleshGrateTex = generateFleshGrateTexture();
+
+// Thick metal grating with dark holes and dirt noise
+function generateMetalGrateTexture() {
+    const USIZE = 128;
+    const VSIZE = 64;
+    const WSIZE = 32;
+    const texture = new Uint32Array(USIZE * VSIZE * WSIZE);
+
+    function hash(x, y, z) {
+        let h = ((x * 374761393 + y * 668265263 + z * 1274126177) | 0);
+        h = ((h ^ (h >> 13)) * 1103515245 + 12345) | 0;
+        return (h & 0x7fffffff) / 0x7fffffff;
+    }
+
+    const period = 8;    // total period of bar + hole
+    const barWidth = 6;  // thick bars
+    const periodW = 6;   // add explicit W structure for unblink slices
+    const barWidthW = 4;
+
+    // Baked light clusters repeated along u
+    const lightSpacing = 32;
+    const lightRadius = 18;
+    const lightV1 = VSIZE * 0.84, lightW1 = WSIZE * 0.28; // near top (Z+)
+    const lightV2 = VSIZE * 0.92, lightW2 = WSIZE * 0.72; // near top (Z+), second cluster in W
+
+    for (let w = 0; w < WSIZE; w++) {
+        for (let v = 0; v < VSIZE; v++) {
+            for (let u = 0; u < USIZE; u++) {
+                const index = u + v * USIZE + w * USIZE * VSIZE;
+                const n = hash(u, v, w);
+
+                const inBarU = (u % period) < barWidth;
+                const inBarV = (v % period) < barWidth;
+                const inBarW = (w % periodW) < barWidthW;
+                const isBar = inBarU || inBarV || inBarW;
+
+                let r, g, b;
+
+                if (isBar) {
+                    // Thick metal bar (darker base)
+                    const metalBase = 45 + n * 15;
+
+                    // Dirt noise: darker splotches
+                    const dirt = hash(u * 3 + 7, v * 5 + 13, w * 2 + 31);
+                    const dirtFactor = 1.0 - (dirt > 0.6 ? (dirt - 0.6) * 0.8 : 0);
+
+                    r = metalBase * dirtFactor;
+                    g = (metalBase + 2) * dirtFactor;
+                    b = (metalBase + 4) * dirtFactor;
+
+                    // Slight highlight on bar edges (where bar meets hole)
+                    const uInBar = u % period;
+                    const vInBar = v % period;
+                    const wInBar = w % periodW;
+                    const nearEdgeU = inBarU && (uInBar === 0 || uInBar === barWidth - 1);
+                    const nearEdgeV = inBarV && (vInBar === 0 || vInBar === barWidth - 1);
+                    const nearEdgeW = inBarW && (wInBar === 0 || wInBar === barWidthW - 1);
+                    if (nearEdgeU || nearEdgeV || nearEdgeW) {
+                        r = Math.min(255, r + 10);
+                        g = Math.min(255, g + 10);
+                        b = Math.min(255, b + 12);
+                    }
+                } else {
+                    // Dark hole
+                    r = 3 + n * 4;
+                    g = 3 + n * 3;
+                    b = 4 + n * 4;
+                }
+
+                // Baked lights (two clusters) repeated along corridor axis.
+                const nearestLightU = Math.round(u / lightSpacing) * lightSpacing;
+                const du = u - nearestLightU;
+                const dv1 = v - lightV1, dw1 = w - lightW1;
+                const dv2 = v - lightV2, dw2 = w - lightW2;
+                const dist1 = Math.sqrt(du * du + dv1 * dv1 + dw1 * dw1);
+                const dist2 = Math.sqrt(du * du + dv2 * dv2 + dw2 * dw2);
+                const light1 = Math.max(0, 1.0 - dist1 / lightRadius);
+                const light2 = Math.max(0, 1.0 - dist2 / lightRadius);
+                const lightIntensity = Math.min(1.0, light1 * light1 + light2 * light2);
+
+                // Apply light: cool white-blue glow for metal
+                r = r * (1.0 + lightIntensity * 1.9);
+                g = g * (1.0 + lightIntensity * 2.2);
+                b = b * (1.0 + lightIntensity * 2.7);
+
+                // Darker corridor edges and corners (baked AO look).
+                const vEdge = Math.abs(v - VSIZE / 2) / (VSIZE / 2);
+                const wEdge = Math.abs(w - WSIZE / 2) / (WSIZE / 2);
+                const edge = Math.max(vEdge, wEdge);
+                const cornerDark = 1.0 / (1.0 + 3.2 * edge * edge);
+                r *= cornerDark;
+                g *= cornerDark;
+                b *= cornerDark;
+
+                r = Math.max(0, Math.min(255, Math.round(r)));
+                g = Math.max(0, Math.min(255, Math.round(g)));
+                b = Math.max(0, Math.min(255, Math.round(b)));
+
+                texture[index] = (255 << 24) | (b << 16) | (g << 8) | r;
+            }
+        }
+    }
+
+    return { texture, texture_info: { USIZE, VSIZE, WSIZE } };
+}
+const metalGrateTex = generateMetalGrateTexture();
+const room2PipesTex = generateMetalPipesTexture();
+// Starry sky texture - mostly black with white and slightly colored dots
+function generateStarryTexture() {
+    const USIZE = 128;
+    const VSIZE = 96;
+    const WSIZE = 128;
+    const texture = new Uint32Array(USIZE * VSIZE * WSIZE);
+
+    function hash(x, y, z) {
+        let h = ((x * 374761393 + y * 668265263 + z * 1274126177) | 0);
+        h = ((h ^ (h >> 13)) * 1103515245 + 12345) | 0;
+        return (h & 0x7fffffff) / 0x7fffffff;
+    }
+
+    // Star colors: mostly white, some blue-white, yellow-white, reddish
+    const starColors = [
+        [255, 255, 255],   // pure white
+        [255, 255, 255],   // pure white (more common)
+        [200, 220, 255],   // blue-white
+        [180, 200, 255],   // blue
+        [255, 240, 200],   // yellow-white
+        [255, 200, 170],   // warm/reddish
+    ];
+
+    // Pre-generate stars as ellipsoids with large W extent (like dark eyes texture)
+    // so they're visible in any W-slice of the 3D texture
+    const stars = [];
+    const numStars = 80;
+    for (let i = 0; i < numStars; i++) {
+        stars.push({
+            u: hash(i * 7 + 3, i * 11 + 17, 1) * USIZE,
+            v: hash(i * 13 + 5, i * 19 + 23, 2) * VSIZE,
+            w: hash(i * 29 + 7, i * 31 + 11, 3) * WSIZE,
+            radUV: 1.0 + hash(i * 37, i * 41, 4) * 2.0,  // UV radius 1-3
+            radW: 15 + hash(i * 43, i * 47, 5) * 35,      // W extent 15-50 (large!)
+            colorIdx: Math.floor(hash(i * 53, i * 59, 6) * starColors.length),
+            brightness: 0.6 + hash(i * 61, i * 67, 7) * 0.4
+        });
+    }
+
+    for (let w = 0; w < WSIZE; w++) {
+        for (let v = 0; v < VSIZE; v++) {
+            for (let u = 0; u < USIZE; u++) {
+                const index = u + v * USIZE + w * USIZE * VSIZE;
+
+                // Very dark background with subtle noise
+                const n = hash(u, v, w);
+                const base = 1 + n * 3;
+                let r = base, g = base, b = base + 1; // faint blue-black tint
+
+                // Check all stars
+                let maxGlow = 0;
+                let bestColor = null;
+                for (const star of stars) {
+                    const du = (u - star.u) / star.radUV;
+                    const dv = (v - star.v) / star.radUV;
+                    let dw_raw = Math.abs(w - star.w);
+                    if (dw_raw > WSIZE / 2) dw_raw = WSIZE - dw_raw; // wrap W
+                    const dw = dw_raw / star.radW;
+
+                    const dist2 = du * du + dv * dv + dw * dw;
+                    if (dist2 < 1.0) {
+                        const intensity = 1.0 - Math.sqrt(dist2);
+                        const glow = intensity * intensity * star.brightness;
+                        if (glow > maxGlow) {
+                            maxGlow = glow;
+                            bestColor = starColors[star.colorIdx];
+                        }
+                    }
+                }
+
+                if (maxGlow > 0) {
+                    r = Math.max(r, bestColor[0] * maxGlow);
+                    g = Math.max(g, bestColor[1] * maxGlow);
+                    b = Math.max(b, bestColor[2] * maxGlow);
+                }
+
+                r = Math.max(0, Math.min(255, Math.round(r)));
+                g = Math.max(0, Math.min(255, Math.round(g)));
+                b = Math.max(0, Math.min(255, Math.round(b)));
+
+                texture[index] = (255 << 24) | (b << 16) | (g << 8) | r;
+            }
+        }
+    }
+
+    return { texture, texture_info: { USIZE, VSIZE, WSIZE } };
+}
+const starryTex = generateStarryTexture();
+
+// Cement wall texture - rough concrete with cracks, stains, and form marks
+function generateDamCementTexture() {
+    const USIZE = 128;
+    const VSIZE = 96;
+    const WSIZE = 128;
+    const texture = new Uint32Array(USIZE * VSIZE * WSIZE);
+
+    function hash(x, y, z) {
+        let h = ((x * 374761393 + y * 668265263 + z * 1274126177) | 0);
+        h = ((h ^ (h >> 13)) * 1103515245 + 12345) | 0;
+        return (h & 0x7fffffff) / 0x7fffffff;
+    }
+    function smoothHash(x, y, z) {
+        const x0 = Math.floor(x), x1 = x0 + 1, xf = x - x0;
+        const y0 = Math.floor(y), y1 = y0 + 1, yf = y - y0;
+        const z0 = Math.floor(z), z1 = z0 + 1, zf = z - z0;
+        const sx = xf * xf * (3 - 2 * xf);
+        const sy = yf * yf * (3 - 2 * yf);
+        const sz = zf * zf * (3 - 2 * zf);
+        const n000 = hash(x0, y0, z0), n100 = hash(x1, y0, z0);
+        const n010 = hash(x0, y1, z0), n110 = hash(x1, y1, z0);
+        const n001 = hash(x0, y0, z1), n101 = hash(x1, y0, z1);
+        const n011 = hash(x0, y1, z1), n111 = hash(x1, y1, z1);
+        const nx00 = n000 + (n100 - n000) * sx;
+        const nx10 = n010 + (n110 - n010) * sx;
+        const nx01 = n001 + (n101 - n001) * sx;
+        const nx11 = n011 + (n111 - n011) * sx;
+        const nxy0 = nx00 + (nx10 - nx00) * sy;
+        const nxy1 = nx01 + (nx11 - nx01) * sy;
+        return nxy0 + (nxy1 - nxy0) * sz;
+    }
+
+    // Form lines (horizontal marks from concrete formwork)
+    const formPeriod = 24;
+
+    for (let w = 0; w < WSIZE; w++) {
+        for (let v = 0; v < VSIZE; v++) {
+            for (let u = 0; u < USIZE; u++) {
+                const index = u + v * USIZE + w * USIZE * VSIZE;
+                const n = hash(u, v, w);
+
+                // Multi-octave noise for surface variation
+                const n1 = smoothHash(u / 12, v / 12, w / 12);
+                const n2 = smoothHash(u / 6 + 50, v / 6 + 50, w / 6 + 50) * 0.5;
+                const n3 = smoothHash(u / 25 + 100, v / 25 + 100, w / 25 + 100) * 0.7;
+                const surface = (n1 + n2 + n3) / 2.2;
+
+                // Base cement color: cool grey
+                let r = 85 + surface * 35 + n * 8;
+                let g = 88 + surface * 33 + n * 7;
+                let b = 90 + surface * 30 + n * 6;
+
+                // Horizontal form lines (subtle darker bands)
+                const formPos = v % formPeriod;
+                if (formPos < 2) {
+                    const formDark = 0.82;
+                    r *= formDark; g *= formDark; b *= formDark;
+                }
+
+                // Cracks: thin dark lines using high-frequency noise threshold
+                const crack = smoothHash(u / 2.0 + 200, v / 8.0 + 200, w / 2.0 + 200);
+                if (crack > 0.78 && crack < 0.82) {
+                    r *= 0.5; g *= 0.5; b *= 0.5;
+                }
+
+                // Water stain patches (slightly darker, greenish tint)
+                const stain = smoothHash(u / 18 + 300, v / 10 + 300, w / 18 + 300);
+                if (stain > 0.65) {
+                    const s = (stain - 0.65) / 0.35;
+                    r *= (1 - s * 0.15);
+                    g *= (1 - s * 0.05);
+                    b *= (1 - s * 0.12);
+                }
+
+                // Spherical lights
+                const lightSpacing = 48;
+                const lightRadius = 28;
+                const nearestLightU = Math.round(u / lightSpacing) * lightSpacing;
+                const lightV = VSIZE / 2;
+                const lightW = Math.round(w / lightSpacing) * lightSpacing;
+                const du = u - nearestLightU;
+                const dv = v - lightV;
+                const dw = w - lightW;
+                const dist = Math.sqrt(du * du + dv * dv + dw * dw);
+                const lightBright = Math.max(0, 1.0 - dist / lightRadius);
+                const lightIntensity = lightBright * lightBright;
+                r = r * (1.0 + lightIntensity * 1.2);
+                g = g * (1.0 + lightIntensity * 1.1);
+                b = b * (1.0 + lightIntensity * 0.8);
+
+                r = Math.max(0, Math.min(255, Math.round(r)));
+                g = Math.max(0, Math.min(255, Math.round(g)));
+                b = Math.max(0, Math.min(255, Math.round(b)));
+                texture[index] = (255 << 24) | (b << 16) | (g << 8) | r;
+            }
+        }
+    }
+    return { texture, texture_info: { USIZE, VSIZE, WSIZE } };
+}
+
+// Industrial metal panel texture - dark riveted steel plates
+function generateDamMetalTexture() {
+    const USIZE = 128;
+    const VSIZE = 96;
+    const WSIZE = 128;
+    const texture = new Uint32Array(USIZE * VSIZE * WSIZE);
+
+    function hash(x, y, z) {
+        let h = ((x * 374761393 + y * 668265263 + z * 1274126177) | 0);
+        h = ((h ^ (h >> 13)) * 1103515245 + 12345) | 0;
+        return (h & 0x7fffffff) / 0x7fffffff;
+    }
+
+    for (let w = 0; w < WSIZE; w++) {
+        for (let v = 0; v < VSIZE; v++) {
+            for (let u = 0; u < USIZE; u++) {
+                const index = u + v * USIZE + w * USIZE * VSIZE;
+                const n = hash(u, v, w);
+                const n2 = hash(u * 2 + 11, v * 2 + 17, w * 2 + 23);
+                const nCell = hash(Math.floor(u / 6), Math.floor(v / 6) + 41, Math.floor(w / 6) + 83);
+                const nMacro = hash(Math.floor(u / 18) + 131, Math.floor(v / 18) + 197, Math.floor(w / 18) + 227);
+
+                // Isotropic metal body: no axis-locked seams/rivets.
+                let r = 36 + nCell * 34 + (n - 0.5) * 9;
+                let g = 39 + nCell * 33 + (n2 - 0.5) * 8;
+                let b = 46 + nCell * 37 + (n - 0.5) * 10;
+
+                // Soft pitting/corrosion.
+                const pit = hash(Math.floor(u / 4) + 307, Math.floor(v / 4) + 401, Math.floor(w / 4) + 503);
+                if (pit > 0.80) {
+                    const p = (pit - 0.80) / 0.20;
+                    r *= (1.0 - p * 0.45);
+                    g *= (1.0 - p * 0.45);
+                    b *= (1.0 - p * 0.40);
+                }
+
+                // Organic slot field from multiple oriented sine waves (isotropic-ish).
+                const q1 = u * 0.081 + v * 0.056 + w * 0.071;
+                const q2 = -u * 0.063 + v * 0.089 + w * 0.047 + 1.9;
+                const q3 = u * 0.052 - v * 0.074 + w * 0.082 + 0.7;
+                const w1 = Math.abs(Math.sin(q1));
+                const w2 = Math.abs(Math.sin(q2));
+                const w3 = Math.abs(Math.sin(q3));
+                const slotWave = Math.min(w1, Math.min(w2, w3));
+
+                // Sparse patch gating so slots don't fill every wall.
+                const slotPatch = Math.max(0, (nMacro - 0.42) / 0.58);
+                const slotSoft = Math.max(0, (0.17 - slotWave) / 0.17);
+                const slot = slotSoft * slotPatch;
+
+                // Sinews around slots (fleshy strands hugging the metal tears).
+                const sinewSoft = Math.max(0, (0.30 - slotWave) / 0.30) * (1.0 - slotSoft * 0.85) * slotPatch;
+
+                // Keep slot cores dark and bloody.
+                if (slot > 0) {
+                    const s = slot * slot;
+                    r = r * (1.0 - s * 0.90) + s * (108 + n2 * 20);
+                    g = g * (1.0 - s * 0.96) + s * (9 + n * 4);
+                    b = b * (1.0 - s * 0.97) + s * (7 + n * 3);
+                }
+
+                // Sinewy tissue tint around slots.
+                if (sinewSoft > 0) {
+                    const t = sinewSoft * sinewSoft;
+                    r = r * (1.0 - t * 0.50) + t * (82 + n * 14);
+                    g = g * (1.0 - t * 0.76) + t * (20 + n2 * 6);
+                    b = b * (1.0 - t * 0.78) + t * (16 + n * 5);
+                }
+
+                // Broad baked lights (top-biased), smooth to reduce aliasing in W slices.
+                const lightSpacing = 56;
+                const lightRadius = 52;
+                const nearestU1 = Math.round(u / lightSpacing) * lightSpacing;
+                const nearestW1 = Math.round(w / lightSpacing) * lightSpacing;
+                const nearestU2 = Math.round((u - lightSpacing * 0.5) / lightSpacing) * lightSpacing + lightSpacing * 0.5;
+                const nearestW2 = Math.round((w - lightSpacing * 0.5) / lightSpacing) * lightSpacing + lightSpacing * 0.5;
+                const lightV1 = VSIZE * 0.98; // top of wall (Z+)
+                const lightV2 = VSIZE * 0.95; // second top-biased fixture
+                const du1 = u - nearestU1, dv1 = v - lightV1, dw1v = (w - nearestW1) * 0.45;
+                const du2 = u - nearestU2, dv2 = v - lightV2, dw2v = (w - nearestW2) * 0.45;
+                const d1 = Math.sqrt(du1 * du1 + dv1 * dv1 + dw1v * dw1v);
+                const d2 = Math.sqrt(du2 * du2 + dv2 * dv2 + dw2v * dw2v);
+                const lb1 = Math.max(0, 1.0 - d1 / lightRadius);
+                const lb2 = Math.max(0, 1.0 - d2 / lightRadius);
+                const li = Math.min(1.0, lb1 * lb1 + lb2 * lb2 * 0.65);
+                r *= (1.0 + li * 1.35);
+                g *= (1.0 + li * 1.30);
+                b *= (1.0 + li * 1.60);
+
+                // Corner attenuation for depth.
+                const vEdge = Math.abs(v - VSIZE / 2) / (VSIZE / 2);
+                const wEdge = Math.abs(w - WSIZE / 2) / (WSIZE / 2);
+                const edge = Math.max(vEdge, wEdge);
+                const ao = 1.0 / (1.0 + 2.4 * edge * edge);
+                r *= ao;
+                g *= ao;
+                b *= ao;
+
+                r = Math.max(0, Math.min(255, Math.round(r)));
+                g = Math.max(0, Math.min(255, Math.round(g)));
+                b = Math.max(0, Math.min(255, Math.round(b)));
+                texture[index] = (255 << 24) | (b << 16) | (g << 8) | r;
+            }
+        }
+    }
+    return { texture, texture_info: { USIZE, VSIZE, WSIZE } };
+}
+
+// Blood canal texture - cement base with blood channels running down slanted surfaces
+function generateBloodCanalTexture() {
+    const USIZE = 128;
+    const VSIZE = 96;
+    const WSIZE = 128;
+    const texture = new Uint32Array(USIZE * VSIZE * WSIZE);
+
+    function hash(x, y, z) {
+        let h = ((x * 374761393 + y * 668265263 + z * 1274126177) | 0);
+        h = ((h ^ (h >> 13)) * 1103515245 + 12345) | 0;
+        return (h & 0x7fffffff) / 0x7fffffff;
+    }
+    function smoothHash(x, y, z) {
+        const x0 = Math.floor(x), x1 = x0 + 1, xf = x - x0;
+        const y0 = Math.floor(y), y1 = y0 + 1, yf = y - y0;
+        const z0 = Math.floor(z), z1 = z0 + 1, zf = z - z0;
+        const sx = xf * xf * (3 - 2 * xf);
+        const sy = yf * yf * (3 - 2 * yf);
+        const sz = zf * zf * (3 - 2 * zf);
+        const n000 = hash(x0, y0, z0), n100 = hash(x1, y0, z0);
+        const n010 = hash(x0, y1, z0), n110 = hash(x1, y1, z0);
+        const n001 = hash(x0, y0, z1), n101 = hash(x1, y0, z1);
+        const n011 = hash(x0, y1, z1), n111 = hash(x1, y1, z1);
+        const nx00 = n000 + (n100 - n000) * sx;
+        const nx10 = n010 + (n110 - n010) * sx;
+        const nx01 = n001 + (n101 - n001) * sx;
+        const nx11 = n011 + (n111 - n011) * sx;
+        const nxy0 = nx00 + (nx10 - nx00) * sy;
+        const nxy1 = nx01 + (nx11 - nx01) * sy;
+        return nxy0 + (nxy1 - nxy0) * sz;
+    }
+
+    // Pre-compute blood canal map
+    // Canals flow along u (the slope direction), shaped by v/w cross-section noise
+    const bloodMap = new Float32Array(USIZE * VSIZE * WSIZE);
+    for (let w = 0; w < WSIZE; w++) {
+        for (let v = 0; v < VSIZE; v++) {
+            for (let u = 0; u < USIZE; u++) {
+                // Canal channels: narrow streaks along u, positioned by v/w noise
+                const n1 = smoothHash(u / 50, v / 4, w / 4);
+                const n2 = smoothHash(u / 25 + 50, v / 6 + 30, w / 6 + 30) * 0.5;
+                const n3 = smoothHash(u / 80 + 100, v / 3 + 60, w / 3 + 60) * 0.3;
+                let blood = (n1 + n2 + n3) / 1.8;
+                // Sharper threshold for canal-like shapes
+                blood = Math.max(0, (blood - 0.45) / 0.55);
+                blood = blood * blood;
+                // Blood accumulates towards bottom of slope (higher u = lower on slope)
+                const uGrad = u / USIZE;
+                blood *= (0.4 + uGrad * 0.6);
+                bloodMap[u + v * USIZE + w * USIZE * VSIZE] = blood;
+            }
+        }
+    }
+
+    for (let w = 0; w < WSIZE; w++) {
+        for (let v = 0; v < VSIZE; v++) {
+            for (let u = 0; u < USIZE; u++) {
+                const index = u + v * USIZE + w * USIZE * VSIZE;
+                const n = hash(u, v, w);
+
+                // Cement base
+                const n1 = smoothHash(u / 12, v / 12, w / 12);
+                const n2 = smoothHash(u / 6 + 50, v / 6 + 50, w / 6 + 50) * 0.5;
+                const surface = (n1 + n2) / 1.5;
+                let r = 80 + surface * 30 + n * 8;
+                let g = 83 + surface * 28 + n * 7;
+                let b = 85 + surface * 25 + n * 6;
+
+                // Cracks
+                const crack = smoothHash(u / 2.0 + 200, v / 8.0 + 200, w / 2.0 + 200);
+                if (crack > 0.78 && crack < 0.82) {
+                    r *= 0.5; g *= 0.5; b *= 0.5;
+                }
+
+                // Blood canals
+                const blood = bloodMap[index];
+                if (blood > 0) {
+                    // Dark red blood with depth variation
+                    const bloodDepth = blood * blood;
+                    r = r * (1 - blood * 0.7) + blood * 120;
+                    g = g * (1 - blood * 0.9) + blood * 8;
+                    b = b * (1 - blood * 0.9) + blood * 5;
+                    // Darker in deeper channels
+                    if (bloodDepth > 0.3) {
+                        const deep = (bloodDepth - 0.3) / 0.7;
+                        r = r * (1 - deep * 0.4) + deep * 50;
+                        g *= (1 - deep * 0.5);
+                        b *= (1 - deep * 0.5);
+                    }
+                }
+
+                // Blood-stained edges around canals (brownish discoloration)
+                const edgeBlood = bloodMap[index];
+                if (edgeBlood > 0.01 && edgeBlood < 0.2) {
+                    const edgeStr = edgeBlood / 0.2;
+                    r = r * (1 - edgeStr * 0.1) + edgeStr * 20;
+                    g *= (1 - edgeStr * 0.15);
+                    b *= (1 - edgeStr * 0.12);
+                }
+
+                // Dim warm lights along the slope
+                const lightSpacing = 48;
+                const lightRadius = 22;
+                const nearestLightU = Math.round(u / lightSpacing) * lightSpacing;
+                const nearestLightW = Math.round(w / lightSpacing) * lightSpacing;
+                const du = u - nearestLightU;
+                const dv = v - VSIZE / 2;
+                const dw = w - nearestLightW;
+                const dist = Math.sqrt(du * du + dv * dv + dw * dw);
+                const lightBright = Math.max(0, 1.0 - dist / lightRadius);
+                const lightIntensity = lightBright * lightBright;
+                r = r * (1.0 + lightIntensity * 1.5);
+                g = g * (1.0 + lightIntensity * 0.8);
+                b = b * (1.0 + lightIntensity * 0.5);
+
+                r = Math.max(0, Math.min(255, Math.round(r)));
+                g = Math.max(0, Math.min(255, Math.round(g)));
+                b = Math.max(0, Math.min(255, Math.round(b)));
+                texture[index] = (255 << 24) | (b << 16) | (g << 8) | r;
+            }
+        }
+    }
+    return { texture, texture_info: { USIZE, VSIZE, WSIZE } };
+}
+
+// Blood pool cement texture - flat cement floor with standing pools of blood
+function generateBloodPoolTexture() {
+    const USIZE = 128;
+    const VSIZE = 96;
+    const WSIZE = 128;
+    const texture = new Uint32Array(USIZE * VSIZE * WSIZE);
+
+    function hash(x, y, z) {
+        let h = ((x * 374761393 + y * 668265263 + z * 1274126177) | 0);
+        h = ((h ^ (h >> 13)) * 1103515245 + 12345) | 0;
+        return (h & 0x7fffffff) / 0x7fffffff;
+    }
+    function smoothHash(x, y, z) {
+        const x0 = Math.floor(x), x1 = x0 + 1, xf = x - x0;
+        const y0 = Math.floor(y), y1 = y0 + 1, yf = y - y0;
+        const z0 = Math.floor(z), z1 = z0 + 1, zf = z - z0;
+        const sx = xf * xf * (3 - 2 * xf);
+        const sy = yf * yf * (3 - 2 * yf);
+        const sz = zf * zf * (3 - 2 * zf);
+        const n000 = hash(x0, y0, z0), n100 = hash(x1, y0, z0);
+        const n010 = hash(x0, y1, z0), n110 = hash(x1, y1, z0);
+        const n001 = hash(x0, y0, z1), n101 = hash(x1, y0, z1);
+        const n011 = hash(x0, y1, z1), n111 = hash(x1, y1, z1);
+        const nx00 = n000 + (n100 - n000) * sx;
+        const nx10 = n010 + (n110 - n010) * sx;
+        const nx01 = n001 + (n101 - n001) * sx;
+        const nx11 = n011 + (n111 - n011) * sx;
+        const nxy0 = nx00 + (nx10 - nx00) * sy;
+        const nxy1 = nx01 + (nx11 - nx01) * sy;
+        return nxy0 + (nxy1 - nxy0) * sz;
+    }
+
+    // Pre-compute blood pool map: large blobby pools on a flat surface
+    const poolMap = new Float32Array(USIZE * VSIZE * WSIZE);
+    for (let w = 0; w < WSIZE; w++) {
+        for (let v = 0; v < VSIZE; v++) {
+            for (let u = 0; u < USIZE; u++) {
+                // Large smooth blobs for pools
+                const n1 = smoothHash(u / 16, v / 16, w / 16);
+                const n2 = smoothHash(u / 8 + 70, v / 8 + 70, w / 8 + 70) * 0.4;
+                const n3 = smoothHash(u / 30 + 140, v / 30 + 140, w / 30 + 140) * 0.6;
+                let pool = (n1 + n2 + n3) / 2.0;
+                // Threshold for distinct pool shapes
+                pool = Math.max(0, (pool - 0.38) / 0.62);
+                pool = Math.min(1, pool * 1.5);
+                poolMap[u + v * USIZE + w * USIZE * VSIZE] = pool;
+            }
+        }
+    }
+
+    for (let w = 0; w < WSIZE; w++) {
+        for (let v = 0; v < VSIZE; v++) {
+            for (let u = 0; u < USIZE; u++) {
+                const index = u + v * USIZE + w * USIZE * VSIZE;
+                const n = hash(u, v, w);
+
+                // Cement base
+                const n1 = smoothHash(u / 12, v / 12, w / 12);
+                const n2 = smoothHash(u / 6 + 50, v / 6 + 50, w / 6 + 50) * 0.5;
+                const surface = (n1 + n2) / 1.5;
+                let r = 85 + surface * 35 + n * 8;
+                let g = 88 + surface * 33 + n * 7;
+                let b = 90 + surface * 30 + n * 6;
+
+                // Form lines
+                const formPos = v % 24;
+                if (formPos < 2) { r *= 0.82; g *= 0.82; b *= 0.82; }
+
+                const pool = poolMap[index];
+                if (pool > 0) {
+                    // Blood pool: dark glossy red, reflective
+                    const poolSmooth = pool * pool; // smoother edges
+                    // Glossy blood surface with subtle specular highlights
+                    const spec = hash(Math.floor(u / 3) * 3 + 500, Math.floor(v / 3) * 3 + 500, Math.floor(w / 3) * 3 + 500);
+                    const specular = spec > 0.92 ? (spec - 0.92) / 0.08 * 30 * poolSmooth : 0;
+                    // Deep dark blood color
+                    r = r * (1 - poolSmooth) + poolSmooth * (55 + n * 15 + specular);
+                    g = g * (1 - poolSmooth) + poolSmooth * (4 + n * 4);
+                    b = b * (1 - poolSmooth) + poolSmooth * (4 + n * 3);
+                } else {
+                    // Dried blood stains around pools (brownish ring)
+                    // Check if nearby texels have blood
+                    const nearPool = poolMap[Math.min(USIZE-1, u+2) + v * USIZE + w * USIZE * VSIZE]
+                                   + poolMap[Math.max(0, u-2) + v * USIZE + w * USIZE * VSIZE]
+                                   + poolMap[u + v * USIZE + Math.min(WSIZE-1, w+2) * USIZE * VSIZE]
+                                   + poolMap[u + v * USIZE + Math.max(0, w-2) * USIZE * VSIZE];
+                    if (nearPool > 0) {
+                        const edgeStr = Math.min(1, nearPool * 0.4);
+                        r = r * (1 - edgeStr * 0.2) + edgeStr * 30;
+                        g *= (1 - edgeStr * 0.3);
+                        b *= (1 - edgeStr * 0.25);
+                    }
+                }
+
+                // Spherical lights
+                const lightSpacing = 48;
+                const lightRadius = 28;
+                const nearestLightU = Math.round(u / lightSpacing) * lightSpacing;
+                const nearestLightW = Math.round(w / lightSpacing) * lightSpacing;
+                const du = u - nearestLightU;
+                const dv = v - VSIZE / 2;
+                const dw = w - nearestLightW;
+                const dist = Math.sqrt(du * du + dv * dv + dw * dw);
+                const lightBright = Math.max(0, 1.0 - dist / lightRadius);
+                const lightIntensity = lightBright * lightBright;
+                // Warm light, blood pools reflect reddish
+                const poolReflect = poolMap[index] > 0.3 ? 1.5 : 1.0;
+                r = r * (1.0 + lightIntensity * 1.2 * poolReflect);
+                g = g * (1.0 + lightIntensity * 1.0);
+                b = b * (1.0 + lightIntensity * 0.7);
+
+                r = Math.max(0, Math.min(255, Math.round(r)));
+                g = Math.max(0, Math.min(255, Math.round(g)));
+                b = Math.max(0, Math.min(255, Math.round(b)));
+                texture[index] = (255 << 24) | (b << 16) | (g << 8) | r;
+            }
+        }
+    }
+    return { texture, texture_info: { USIZE, VSIZE, WSIZE } };
+}
+
+
+const applyTex = (wall, tex, su, sv, sw) => {
+  if (!APPLY_TEXTURES) return; wall.texture = tex.texture; wall.texture_info = tex.texture_info; wall.vertices_in_texmap = wall.vertices_in_object.map(v => new Vector4D((v.y*.5+.5)*su, (v.z*.5+.5)*sv, (v.w*.5+.5)*sw, 0));
+};
+
+const _H = 3; // wall z height
+const _2 = 1.0 / Math.sqrt(2);
+const AREA1_ZH = 100.0;
+
+const ROOM1 = true;
+const CORRIDOR1 = true;
+const ROOM2 = true;
+const ROOM3 = true;
+
+// First room
+//           |---| hr
+//         _3__
+//       /2     \4
+// x <- |1   x   
+//       \7     /5
+//         ----6
+//           | y
+//           v
+//
+const brickTex = generateBrickWallTexture();
+const applyBrick = (wall, su=1, sv=1, sw=1) => {
+  if (!APPLY_TEXTURES) return; wall.texture = brickTex.texture; wall.texture_info = brickTex.texture_info; wall.vertices_in_texmap = wall.vertices_in_object.map(v => new Vector4D((v.y*.5+.5)*su, (v.z*.5+.5)*sv, (v.w*.5+.5)*sw, 0));
+};
+const R1HR = 5; // hexagon radius
+const R1HS = R1HR / (0.5 + _2); // hexagon side
+const R1HW = 10; // w thickness of the room
+const r1c = new Vector4D(0, 0, AREA1_ZH, 0);
+if (ROOM1) {
+  const hr = R1HR; // hexagon radius
+  const hs = R1HS/2.0;
+  const hw = R1HW/2.0;
+  // 1
+  objects.push(createHyperwall(
+    new Transform4D([
+      [ 1,  0,  0,  0, hr],
+      [ 0, hs,  0,  0,  0],
+      [ 0,  0, _H,  0,  AREA1_ZH],
+      [ 0,  0,  0, hw,  0],
+      [ 0,  0,  0,  0,  1]
+    ]),
+    0xff0000
+  ));
+  applyBrick(objects[objects.length - 1], 1, 1, 2);
+  // 2
+  objects.push(createHyperwall(
+    new Transform4D([
+      [    _2, hs*_2,     0,     0, hr*_2],
+      [   -_2, hs*_2,     0,     0,-hr*_2],
+      [     0,     0,    _H,     0,     AREA1_ZH],
+      [     0,     0,     0,    hw,     0],
+      [     0,     0,     0,     0,     1]
+    ]),
+    0x777700
+  ));
+  applyBrick(objects[objects.length - 1], 1, 1, 2);
+  // 3
+  objects.push(createHyperwall(
+    new Transform4D([
+      [     0,    hs,     0,     0,     0],
+      [    -1,     0,     0,     0,   -hr],
+      [     0,     0,    _H,     0,     AREA1_ZH],
+      [     0,     0,     0,    hw,     0],
+      [     0,     0,     0,     0,     1]
+    ]),
+    0x007700
+  ));
+  applyBrick(objects[objects.length - 1], 1, 1, 2);
+  // 4
+  objects.push(createHyperwall(
+    new Transform4D([
+      [   -_2, hs*_2,     0,     0,-hr*_2],
+      [   -_2,-hs*_2,     0,     0,-hr*_2],
+      [     0,     0,    _H,     0,     AREA1_ZH],
+      [     0,     0,     0,    hw,     0],
+      [     0,     0,     0,     0,     1]
+    ]),
+    0x777700
+  ));
+  applyBrick(objects[objects.length - 1], 1, 1, 2);
+  // missing opposite wall, on to 5
+  // 5
+  objects.push(createHyperwall(
+    new Transform4D([
+      [   -_2,-hs*_2,     0,     0,-hr*_2],
+      [    _2,-hs*_2,     0,     0, hr*_2],
+      [     0,     0,    _H,     0,     AREA1_ZH],
+      [     0,     0,     0,    hw,     0],
+      [     0,     0,     0,     0,     1]
+    ]),
+    0x777700
+  ));
+  applyBrick(objects[objects.length - 1], 1, 1, 2);
+  // 6
+  objects.push(createHyperwall(
+    new Transform4D([
+      [     0,   -hs,     0,     0,     0],
+      [     1,     0,     0,     0,    hr],
+      [     0,     0,    _H,     0,     AREA1_ZH],
+      [     0,     0,     0,    hw,     0],
+      [     0,     0,     0,     0,     1]
+    ]),
+    0x00ff00
+  ));
+  applyBrick(objects[objects.length - 1], 1, 1, 2);
+  // 7
+  objects.push(createHyperwall(
+    new Transform4D([
+      [    _2,-hs*_2,     0,     0, hr*_2],
+      [    _2, hs*_2,     0,     0, hr*_2],
+      [     0,     0,    _H,     0,     AREA1_ZH],
+      [     0,     0,     0,    hw,     0],
+      [     0,     0,     0,     0,     1]
+    ]),
+    0x777700
+  ));
+  applyBrick(objects[objects.length - 1], 1, 1, 2);
+  // w+ bounding wall
+  objects.push(createHyperwall(
+    new Transform4D([
+      [     0,    hr,     0,     0,     0],
+      [     0,     0,     0,    hr,     0],
+      [     0,     0,    _H,     0,     AREA1_ZH],
+      [     1,     0,     0,     0,    hw],
+      [     0,     0,     0,     0,     1]
+    ]),
+    0x0000ff
+  ));
+  applyTex(objects[objects.length - 1], darkEyesTex, 1, 1, 1);
+  objects.push(createHyperwall(
+    new Transform4D([
+      [     0,    hr,     0,     0,     0],
+      [     0,     0,     0,    hr,     0],
+      [     0,     0,    _H,     0,     AREA1_ZH],
+      [    -1,     0,     0,     0,   -hw],
+      [     0,     0,     0,     0,     1]
+    ]),
+    0x000077
+  ));
+  applyTex(objects[objects.length - 1], darkEyesTex, 1, 1, 1);
+}
+
+// First corridor
+const C1ml = 50.0;
+if (CORRIDOR1) {
+  const center = new Vector4D(- R1HR - C1ml / 2.0, 0, AREA1_ZH, 0);
+  const main_dir = new Vector4D(1,0,0,0);
+  const main_length = C1ml;
+  const dir1 = new Vector4D(0,1,0,0);
+  const dir2 = new Vector4D(0,0,0,1);
+  const length1 = R1HS;
+  const length2 = R1HW;
+  const c1idx = objects.length;
+  createCorridorTube(objects, center, main_dir, main_length, dir1, dir2, length1, length2, _H);
+  applyBrick(objects[c1idx + 0], 10, 1, 2); // wall 1 (+y side)
+  applyTex(objects[c1idx + 1], darkEyesTex, 10, 1, 2);
+  applyBrick(objects[c1idx + 2], 10, 1, 1); // wall 2 (-w side)
+  applyTex(objects[c1idx + 3], darkEyesTex, 10, 1, 1);
+}
+
+// Second room, cubic with two exits (+x and -w)
+const R2R = 10.0;
+const R2X = -R1HR - C1ml - R2R; // center of room2 in x
+const C2R = 5.0; // corridor 2 size (both dims)
+const r2c = new Vector4D(R2X, 0, AREA1_ZH, 0); // convenience
+const r2_magicwall1_c = r2c.add(new Vector4D(R2R, 0, 0, 0));
+let r2_magicwall1_idx = null;
+if (ROOM2) {
+  const _r = R2R;
+  const h1f1 = R1HS / 2.0 / R2R;
+  const h1f2 = R1HW / 2.0 / R2R;
+  createHyperwallWithCenterHole(objects,
+    new Transform4D([
+        [1, 0, 0, 0, _r + R2X],
+        [0, _r, 0, 0, 0],
+        [0, 0, _H, 0, AREA1_ZH],
+        [0, 0, 0, _r, 0],
+        [0, 0, 0, 0, 1]
+    ]),
+    h1f1, h1f2,
+    0xff0000
+  );
+  applyBrick(objects[objects.length - 4], 2, 1, 2);
+  applyBrick(objects[objects.length - 3], 2, 1, 2);
+  applyBrick(objects[objects.length - 2], 2, 1, 2);
+  applyBrick(objects[objects.length - 1], 2, 1, 2);
+  // magic wall
+  r2_magicwall1_idx = objects.length;
+  objects.push(createHyperwall(
+    new Transform4D([
+      [1, 0, 0, 0,        r2_magicwall1_c.x],
+      [0, R1HS/2.0, 0, 0, r2_magicwall1_c.y],
+      [0, 0, _H, 0,       r2_magicwall1_c.z],
+      [0, 0, 0, R1HW/2.0, r2_magicwall1_c.w],
+      [0, 0, 0, 0, 1]
+    ]),
+    0xff0000
+  ));
+  applyBrick(objects[objects.length - 1], 2, 1, 2);
+  // other walls
+  objects.push(createHyperwall(
+    new Transform4D([
+      [1, 0, 0, 0, -_r + R2X],
+      [0, _r, 0, 0, 0],
+      [0, 0, _H, 0, AREA1_ZH],
+      [0, 0, 0, _r, 0],
+      [0, 0, 0, 0, 1]
+    ]),
+    0x770000
+  ));
+  applyBrick(objects[objects.length - 1], 2, 1, 2);
+  objects.push(createHyperwall(new Transform4D([
+      [0, _r, 0, 0, R2X],
+      [1, 0, 0, 0, _r],
+      [0, 0, _H, 0, AREA1_ZH],
+      [0, 0, 0, _r, 0],
+      [0, 0, 0, 0, 1]
+  ]), 0x00ff00));
+  applyBrick(objects[objects.length - 1], 2, 1, 2);
+  objects.push(createHyperwall(new Transform4D([
+      [0, _r, 0, 0, R2X],
+      [1, 0, 0, 0, -_r],
+      [0, 0, _H, 0, AREA1_ZH],
+      [0, 0, 0, _r, 0],
+      [0, 0, 0, 0, 1]
+  ]), 0x007700));
+  applyBrick(objects[objects.length - 1], 2, 1, 2);
+  // Room2 W+ Wall
+  objects.push(createHyperwall(new Transform4D([
+      [0, _r, 0, 0, R2X],
+      [0, 0, 0, _r, 0],
+      [0, 0, _H, 0, AREA1_ZH],
+      [1, 0, 0, 0, _r],
+      [0, 0, 0, 0, 1]
+  ]), 0x0000ff));
+  if (APPLY_TEXTURES) {
+    const wPlusWall = objects[objects.length - 1];
+    wPlusWall.texture = darkEyesTex.texture;
+    wPlusWall.texture_info = darkEyesTex.texture_info;
+    wPlusWall.vertices_in_texmap = wPlusWall.vertices_in_object.map(
+      v => new Vector4D((v.y * .5 + .5), (v.z * .5 + .5), (v.w * .5 + .5), 0)
+    );
+  }
+  // Room2 W- Wall (with exit)
+  const h2f = C2R / 2.0 / R2R;
+  createHyperwallWithCenterHole(objects,
+    new Transform4D([
+      [0, _r, 0, 0, R2X],
+      [0, 0, 0, _r, 0],
+      [0, 0, _H, 0, AREA1_ZH],
+      [1, 0, 0, 0, -_r],
+      [0, 0, 0, 0, 1]
+    ]),
+    h2f, h2f,
+    0x000077
+  );
+  if (APPLY_TEXTURES) {
+    for (let i = 4; i >= 1; i--) {
+      applyTex(objects[objects.length - i], room2PipesTex, 1, 1, 1);
+    }
+  }
+
+  // Bargainer
+  let bargainer = createBargainer();
+  bargainer.pose.matrix[0][0] = 2.0;
+  bargainer.pose.matrix[1][1] = 2.0;
+  bargainer.pose.matrix[2][2] = 2.0;
+  bargainer.pose.matrix[3][3] = 2.0;
+  bargainer.pose.rotate_self_by_delta('XY', Math.PI, true);
+  bargainer.pose.translate_self_by_delta(R2X - R2R, 0, 1.0+AREA1_ZH, 0);
+  objects.push(bargainer);
+
+} // ROOM 2
+let bargainerIndex = objects.length - 1;
+
+// First area is elevated and so needs a floor surface
+const area1xmax = R1HR;
+const area1xmin = R2X - R2R;
+const area1ymax = R2R;
+const area1ymin = -R2R;
+const area1wmax = R2R;
+const area1wmin = -R2R;
+const a1xl = area1xmax - area1xmin;
+const a1yl = area1ymax - area1ymin;
+const a1wl = area1wmax - area1wmin;
+const a1c = new Vector4D(
+  (area1xmax + area1xmin) / 2.0,
+  (area1ymax + area1ymin) / 2.0,
+  AREA1_ZH,
+  (area1wmax + area1wmin) / 2.0
+);
+let area1Floor = createHyperwall(
+    new Transform4D([
+      [ 0, a1xl/2.0,  0,  0,a1c.x],
+      [ 0,  0,a1yl/2.0,  0, a1c.y],
+      [ 1,  0,  0,      0,  a1c.z],
+      [ 0,  0,  0,a1wl/2.0, a1c.w],
+      [ 0,  0,  0,  0,  1]
+    ]),
+    0xffffff
+  );
+area1Floor.collider = null; // height is handled in the player controller
+// Black and white checkerboard texture with two lights at each end
+{
+  const SU = 320;
+  const SV = 160;
+  const SW = 32;
+  const tex = new Uint32Array(SU * SV * SW);
+  // Two lights at opposite ends of the u-axis (x-direction), centered in v,w
+  const light1 = { u: SU * 2/5, v: SV / 2, w: SW / 2 };
+  const light2 = { u: SU * 0.94, v: SV/2, w: SW/2 }; // player spawn light
+  const light3 = { u: 0, v: SV/4, w: SW/2 };
+  const light4 = { u: 0, v: SV*3/4, w: SW/2 };
+  const lightRadius = SU * 0.15; // falloff radius
+  // Pentagram in UV only so it is identical across all W slices.
+  const pentagramRadius = 30.0;
+  const pentagramThickness = 0.75;
+  const pentagramMask = new Uint8Array(SU * SV);
+  const pentagramVertices = [];
+  for (let i = 0; i < 5; i++) {
+    const a = -Math.PI / 2 + i * (2 * Math.PI / 5);
+    pentagramVertices.push({
+      u: light2.u + pentagramRadius * Math.sin(a) * 0.5,
+      v: light2.v + pentagramRadius * Math.cos(a)
+    });
+  }
+  const pentagramOrder = [0, 2, 4, 1, 3, 0];
+  function pointSegmentDistance2D(px, py, ax, ay, bx, by) {
+    const abx = bx - ax;
+    const aby = by - ay;
+    const apx = px - ax;
+    const apy = py - ay;
+    const abLenSq = abx * abx + aby * aby;
+    const t = abLenSq > 0 ? Math.max(0, Math.min(1, (apx * abx + apy * aby) / abLenSq)) : 0;
+    const cx = ax + t * abx;
+    const cy = ay + t * aby;
+    const dx = px - cx;
+    const dy = py - cy;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+  for (let v = 0; v < SV; v++) {
+    for (let u = 0; u < SU; u++) {
+      let minDist = Infinity;
+      for (let i = 0; i < 5; i++) {
+        const a = pentagramVertices[pentagramOrder[i]];
+        const b = pentagramVertices[pentagramOrder[i + 1]];
+        const d = pointSegmentDistance2D(u, v, a.u, a.v, b.u, b.v);
+        if (d < minDist) minDist = d;
+      }
+      if (minDist <= pentagramThickness) {
+        pentagramMask[u + v * SU] = 1;
+      }
+    }
+  }
+  for (let w = 0; w < SW; w++) {
+    for (let v = 0; v < SV; v++) {
+      for (let u = 0; u < SU; u++) {
+        // Distance to each light
+        let d1 = Math.sqrt((u - light1.u) ** 2 + (v - light1.v) ** 2 + (w - light1.w) ** 2);
+        let d2 = Math.sqrt((u - light2.u) ** 2 + (v - light2.v) ** 2 + (w - light2.w) ** 2);
+        let d3 = Math.sqrt((u - light3.u) ** 2 + (v - light3.v) ** 2 + (w - light3.w) ** 2);
+        let d4 = Math.sqrt((u - light4.u) ** 2 + (v - light4.v) ** 2 + (w - light4.w) ** 2);
+        // Smooth falloff: bright near light, dark far away
+        let b1 = Math.max(0, 1.0 - d1 / lightRadius);
+        let b2 = Math.max(0, 1.0 - d2 / lightRadius);
+        let b3 = Math.max(0, 1.0 - d3 / lightRadius);
+        let b4 = Math.max(0, 1.0 - d4 / lightRadius);
+        let brightness = Math.min(1.0, b1 + b2 + b3 + b4);
+        // Base checkerboard
+        let isWhite = ((Math.ceil(u/10) + Math.ceil(v/10) + w) % 2 === 0);
+        let base = isWhite ? 255 : 30;
+        let minBright = isWhite ? 0.35 : 0.05;
+        let lit = base * (minBright + (1.0 - minBright) * brightness);
+        // Per-texel dirt noise
+        let nh = ((u * 374761393 + v * 668265263 + w * 1274126177) | 0);
+        nh = ((nh ^ (nh >> 13)) * 1103515245 + 12345) | 0;
+        let noise = ((nh & 0x7fffffff) / 0x7fffffff - 0.5) * 20;
+        lit = Math.max(0, Math.min(255, lit + noise));
+        // Warm orange tint near lights
+        let r = Math.round(Math.min(255, lit * (1.0 + 0.15 * brightness)));
+        let g = Math.round(Math.min(255, lit * (1.0 + 0.05 * brightness)));
+        let b = Math.round(Math.max(0, lit * (1.0 - 0.10 * brightness)));
+        if (pentagramMask[u + v * SU] === 1) {
+          r = 200;
+          g = 30;
+          b = 30;
+        }
+        let rgba_u32 = (255 << 24) | (b << 16) | (g << 8) | r;
+        tex[u + v * SU + w * SU * SV] = rgba_u32;
+      }
+    }
+  }
+  area1Floor.texture = tex;
+  area1Floor.texture_info = { USIZE: SU, VSIZE: SV, WSIZE: SW };
+}
+objects.push(area1Floor);
+
+// End of Area1 -------------------------------------------
+
+// corridor 2 (falling down)
+let c2l = AREA1_ZH;
+let c2c = new Vector4D(R2X, 0, AREA1_ZH / 2.0 + _H, -R2R - C2R / 2.0);
+createCorridorTubeWithHole(objects, c2c, new Vector4D(0,0,-1,0), c2l, new Vector4D(0,0,0,1), new Vector4D(1,0,0,0), C2R, C2R, -c2l / 2.0 + _H / 2.0, _H + 2.0, new Vector4D(0,1,0,0), C2R, true);
+if (APPLY_TEXTURES) {
+  // Corridor 2 creates 6 walls: 1a, 2, 3, 4, z-bottom, z-top (1b has length <= 0)
+  for (let i = 6; i >= 1; i--) {
+    const wall = objects[objects.length - i];
+    wall.texture = fallTex.texture;
+    wall.texture_info = fallTex.texture_info;
+    wall.vertices_in_texmap = wall.vertices_in_object.map(
+      v => new Vector4D((v.y * .5 + .5), (v.z * .5 + .5), (v.w * .5 + .5), 0)
+    );
+  }
+}
+
+// Area2 ------------------------------------------------
+
+// Corridor 3 (-w, gun)
+const c3r = C2R;
+const C3L = 30.0;
+let c3c = new Vector4D(R2X, 0, 0, -R2R - C3L / 2.0);
+createCorridorTubeWithHole(objects, c3c, new Vector4D(0,0,0,-1), C3L, new Vector4D(0,1,0,0), new Vector4D(1,0,0,0), c3r, c3r, 0.0, 0.0, new Vector4D(0,0,1,0), _H, false);
+if (APPLY_TEXTURES) {
+  // Corridor 3 walls: 1a(y+), 1b(y+), 2(x-), 3(y-), 4(x+), 5(endcap)
+  applyTex(objects[objects.length - 6], metalGrateTex, 1, 1, 1); // 1a (y+)
+  applyTex(objects[objects.length - 5], metalGrateTex, 1, 1, 1); // 1b (y+)
+  applyTex(objects[objects.length - 4], fleshGrateTex, 1, 1, 1); // 2 (x-)
+  applyTex(objects[objects.length - 3], metalGrateTex, 1, 1, 1); // 3 (y-)
+  applyTex(objects[objects.length - 2], fleshGrateTex, 1, 1, 1); // 4 (x+)
+  applyTex(objects[objects.length - 1], metalGrateTex, 1, 1, 1); // 5 (endcap)
+}
+
+// Corridor 4
+const c4r = c3r;
+const C4L = 30.0;
+let c4c = new Vector4D(R2X, 0, 0, -R2R - C3L - C4L / 2.0);
+createCorridorTubeWithHole(objects, c4c, new Vector4D(0,0,0,1), C4L, new Vector4D(0,1,0,0), new Vector4D(1,0,0,0), c4r, c4r, -C4L / 2.0 + c4r, c4r, new Vector4D(0,0,1,0), _H, false);
+// Corridor 4 walls: 1a(y+), 1b(y+), 2(x-), 3(y-), 4(x+), 5(endcap)
+applyTex(objects[objects.length - 6], metalGrateTex, 1, 1, 1); // 1a (y+)
+applyTex(objects[objects.length - 5], metalGrateTex, 1, 1, 1); // 1b (y+)
+applyTex(objects[objects.length - 4], fleshGrateTex, 1, 1, 1); // 2 (x-)
+applyTex(objects[objects.length - 3], metalGrateTex, 1, 1, 1); // 3 (y-)
+applyTex(objects[objects.length - 2], fleshGrateTex, 1, 1, 1); // 4 (x+)
+applyTex(objects[objects.length - 1], metalGrateTex, 1, 1, 1); // 5 (endcap)
+
+// Corridor 5a (y+), wide in x, narrow in w
+//   ______
+// __|    _  
+// __    |_|  | x
+//   |_____   v
+//      <--
+//       y
+const c5ar1 = c4r;
+const C5A_R2 = 20.0;
+const C5A_L = 30.0;
+let c5c = new Vector4D(R2X, C5A_L / 2.0 + c4r / 2.0, 0, -R2R - C3L - C4L + c4r);
+let c5_entrance = new Vector4D(R2X,       c4r / 2.0, 0, -R2R - C3L - C4L + c4r);
+createHyperwallWithCenterHole(
+  objects,
+  new Transform4D([
+    [  0,  C5A_R2/2.0,  0,        0, c5_entrance.x],
+    [  1,        0,  0,        0, c5_entrance.y],
+    [  0,        0, _H,        0, c5_entrance.z],
+    [  0,        0,  0,   c5ar1/2, c5_entrance.w],
+    [  0,        0,  0,        0,      1]
+  ]),
+  c5ar1 / C5A_R2,
+  c5ar1 / c5ar1,
+  0x0000ff
+);
+applyTex(objects[objects.length - 4], fleshGrateTex, 1, 1, 1);
+applyTex(objects[objects.length - 3], fleshGrateTex, 1, 1, 1);
+applyTex(objects[objects.length - 2], fleshGrateTex, 1, 1, 1);
+applyTex(objects[objects.length - 1], fleshGrateTex, 1, 1, 1);
+createCorridorTube(objects, c5c, new Vector4D(0,1,0,0), C5A_L, new Vector4D(0,0,0,1), new Vector4D(1,0,0,0), c5ar1, C5A_R2, _H);
+applyTex(objects[objects.length - 4], metalGrateTex, 1, 1, 1);
+applyTex(objects[objects.length - 3], fleshGrateTex, 1, 1, 1);
+applyTex(objects[objects.length - 2], metalGrateTex, 1, 1, 1);
+applyTex(objects[objects.length - 1], fleshGrateTex, 1, 1, 1);
+objects.push(createObstacleCube(new Transform4D([
+    [  3,        0,  0,        0, c5c.x],
+    [  0,        3,  0,        0, c5c.y],
+    [  0,        0, _H/2.0,        0, c5c.z + _H/2.0],
+    [  0,        0,  0,c5ar1/2.0, c5c.w],
+    [  0,        0,  0,        0,      1]
+  ]),
+  0x00ff00
+));
+applyTex(objects[objects.length - 1], fleshGrateTex, 1, 1, 1);
+// prep two monster spawns
+const c5_monster1 = c5c.add(new Vector4D(6, 0, 0, 0));
+const c5_monster2 = c5c.add(new Vector4D(-6, 0, 0, 0));
+// === Room 3 textures: Industrial dam theme ===
+
+
+const damCementTex = generateDamCementTexture();
+const damMetalTex = generateDamMetalTexture();
+const bloodCanalTex = generateBloodCanalTexture();
+const bloodPoolTex = generateBloodPoolTexture();
+const corridor6PipesTex = generateCorridor6PipesTexture();
+const room4BioCircuitTex = generateRoom4BioCircuitTexture();
+const room5RockTex = generateRoom5RockTexture();
+const obsidianBridgeTex = generateObsidianCheckerTexture(false);
+const obsidianGemMonolithTex = generateObsidianCheckerTexture(true);
+
+// Room 3
+
+const R3YL = 20.0;
+const R3WL = 40.0;
+const R3XL = C5A_R2;
+const R3_ENDYL = 10.0; // wall 5 y length
+const R3_OUTWL = 5.0 / _2; // out opening width in W
+const R3_OUTYL = 7.0; // out corridor (w7) y side
+const R3_OUTXL = R3XL;
+const r3_ref = new Vector4D(R2X, C5A_L + c5ar1 / 2.0, 0, -R2R - C3L - C4L + c4r / 2.0); // ref point
+const r3_entrance = r3_ref.add(new Vector4D(0, 0, 0, c4r / 2.0));
+//                     . r3_ref
+//        \          / |
+//c6_ref . \6      3/  | 1
+//       7\ \__4___/ / |   |
+//        5|___________|   v y
+//               2
+//            w <-- 
+const w1_c = r3_ref.add(new Vector4D(0, R3YL / 2.0, 0, 0));
+const w2_c = w1_c.add(new Vector4D(0, R3YL/2.0, 0, R3WL / 2.0));
+const w3_dy = R3YL - R3_ENDYL;
+const w3_dw = w3_dy;
+const w3_wyl = Math.sqrt(w3_dw * w3_dw + w3_dy * w3_dy);
+const w3_c = r3_ref.add(new Vector4D(0, w3_dy/2.0, 0, c5ar1 + w3_dw/2.0));
+const W3A_DW = 10.0;
+const W3A_DY = 10.0;
+const W3B_DY = 10.0;
+const W3C_DW = 10.0;
+const W3A_GAP = c5ar1;
+// triangular walls in w1/2 corner
+const w3a_c = r3_ref.add(new Vector4D(0, W3A_GAP + W3A_DY/2.0, 0, W3A_GAP + W3A_DW/2.0));  // parallel to w3
+const w3a_wyl = Math.sqrt(W3A_DW * W3A_DW + W3A_DY * W3A_DY);
+const w3b_c = r3_ref.add(new Vector4D(0, W3A_GAP + W3B_DY/2.0, 0, W3A_GAP)); // parallel to w1
+const w3c_c = r3_ref.add(new Vector4D(0, W3A_GAP + W3B_DY, 0, W3A_GAP + W3C_DW/2.0)); // parallel to w2
+// blocks in same corner
+const obst_c = w3b_c.add(new Vector4D(0, 0, 0, -W3A_GAP/2.0)); // wall 1 obstacles
+const obst_x = R3XL / 4.0;
+const obst2_c = w3c_c.add(new Vector4D(0, R3_ENDYL/2.0, 0, 0)); // wall 2 obstacles
+// pillars between wall 2 and 4
+const pill_ref = w2_c.add(new Vector4D(0, -R3_ENDYL/2.0, 0, 5));
+const pill_r = 0.3;
+const w4_wl = R3WL - c5ar1 - w3_dw - R3_OUTWL;
+const w4_c = w3_c.add(new Vector4D(0, w3_dy/2.0, 0, w3_dw/2.0 + w4_wl / 2.0));
+const w5_yl = R3_ENDYL;
+const w5_c = w2_c.add(new Vector4D(0, -w5_yl/2.0, 0, R3WL / 2.0));
+const w7_dy = R3_OUTYL;
+const w7_dw = R3_OUTYL;
+const w7_wyl = Math.sqrt(w7_dw * w7_dw + w7_dy * w7_dy);
+const w6_dw = w7_dw + R3_OUTWL;
+const w6_dy = w6_dw;
+const w6_wyl = Math.sqrt(w6_dw * w6_dw + w6_dy * w6_dy);
+const w6_c = w4_c.add(new Vector4D(0, -w6_dy/2.0, 0, w4_wl / 2.0 + w6_dw / 2.0));
+const w7_c = w5_c.add(new Vector4D(0, -w5_yl/2.0 -w7_dy/2.0, 0, w7_dw/2.0));
+const w8_c = r3_ref.add(new Vector4D(R3XL/2.0, R3YL/2.0, 0, (R3WL + w7_dw)/2.0));
+const w9_c = r3_ref.add(new Vector4D(-R3XL/2.0, R3YL/2.0, 0, (R3WL + w7_dw)/2.0));
+// need to add more x+ end walls to cover extra length of exit corridor
+const w8a_c = r3_ref.add(new Vector4D(R3XL/2.0, -R3YL/2.0, 0, R3WL + w7_dw/2.0));
+const w9a_c = r3_ref.add(new Vector4D(-R3XL/2.0,-R3YL/2.0, 0, R3WL + w7_dw/2.0));
+if (ROOM3) {
+  // 1 - cement wall
+  objects.push(createHyperwall(
+    new Transform4D([
+      [ 0,        0,  0,  R3XL/2.0, w1_c.x],
+      [ 0, R3YL/2.0,  0,         0, w1_c.y],
+      [ 0,        0, _H,         0, w1_c.z],
+      [ 1,        0,  0,         0, w1_c.w],
+      [ 0,        0,  0,         0,      1]
+    ]),
+    0xff0000
+  ));
+  applyTex(objects[objects.length - 1], metalGrateTex, 1, 1, 1);
+  // w2 - blood pools
+  objects.push(createHyperwall(
+    new Transform4D([
+      [ 0,        0,  0,  R3XL/2.0, w2_c.x],
+      [-1,        0,  0,         0, w2_c.y],
+      [ 0,        0, _H,         0, w2_c.z],
+      [ 0, R3WL/2.0,  0,         0, w2_c.w],
+      [ 0,        0,  0,         0,      1]
+    ]),
+    0x00ff00
+  ));
+  applyTex(objects[objects.length - 1], bloodPoolTex, 1, 1, 1);
+  // w3 - blood canals (slanted)
+  objects.push(createHyperwall(
+    new Transform4D([
+      [  0,             0,  0,  R3XL/2.0, w3_c.x],
+      [-_2, w3_wyl/2.0*_2,  0,         0, w3_c.y],
+      [  0,             0, _H,         0, w3_c.z],
+      [ _2, w3_wyl/2.0*_2,  0,         0, w3_c.w],
+      [  0,             0,  0,         0,      1]
+    ]),
+    0xffff00
+  ));
+  applyTex(objects[objects.length - 1], bloodCanalTex, 1, 1, 1);
+  // w3a - blood canals (slanted)
+  objects.push(createHyperwall(
+    new Transform4D([
+      [  0,             0,  0,  R3XL/2.0, w3a_c.x],
+      [-_2, w3a_wyl/2.0*_2,  0,         0, w3a_c.y],
+      [  0,             0, _H,         0, w3a_c.z],
+      [ _2, w3a_wyl/2.0*_2,  0,         0, w3a_c.w],
+      [  0,             0,  0,         0,      1]
+    ]),
+    0xffff00
+  ));
+  applyTex(objects[objects.length - 1], bloodCanalTex, 1, 1, 1);
+  // w3b - cement wall
+  objects.push(createHyperwall(
+    new Transform4D([
+      [ 0,        0,  0,  R3XL/2.0, w3b_c.x],
+      [ 0, W3B_DY/2.0,  0,         0, w3b_c.y],
+      [ 0,        0, _H,         0, w3b_c.z],
+      [ 1,        0,  0,         0, w3b_c.w],
+      [ 0,        0,  0,         0,      1]
+    ]),
+    0xff0000
+  ));
+  applyTex(objects[objects.length - 1], damCementTex, 1, 1, 1);
+  // w3c - cement wall
+  objects.push(createHyperwall(
+    new Transform4D([
+      [ 0,        0,  0,  R3XL/2.0, w3c_c.x],
+      [-1,        0,  0,         0, w3c_c.y],
+      [ 0,        0, _H,         0, w3c_c.z],
+      [ 0, W3C_DW/2.0,  0,         0, w3c_c.w],
+      [ 0,        0,  0,         0,      1]
+    ]),
+    0x00ff00
+  ));
+  applyTex(objects[objects.length - 1], damCementTex, 1, 1, 1);
+  // w4 - cement wall
+  objects.push(createHyperwall(
+    new Transform4D([
+      [ 0,         0,  0,  R3XL/2.0, w4_c.x],
+      [-1,         0,  0,         0, w4_c.y],
+      [ 0,         0, _H,         0, w4_c.z],
+      [ 0, w4_wl/2.0,  0,         0, w4_c.w],
+      [ 0,         0,  0,         0,      1]
+    ]),
+    0x00ff00
+  ));
+  applyTex(objects[objects.length - 1], damCementTex, 1, 1, 1);
+  // w5 - cement wall
+  objects.push(createHyperwall(
+    new Transform4D([
+      [ 0,        0,  0,  R3XL/2.0, w5_c.x],
+      [ 0, w5_yl/2.0,  0,         0, w5_c.y],
+      [ 0,        0, _H,         0, w5_c.z],
+      [ 1,        0,  0,         0, w5_c.w],
+      [ 0,        0,  0,         0,      1]
+    ]),
+    0xff0000
+  ));
+  applyTex(objects[objects.length - 1], metalGrateTex, 1, 1, 1);
+  // w6 - blood canals (slanted)
+  objects.push(createHyperwall(
+    new Transform4D([
+      [  0,             0,  0,  R3XL/2.0, w6_c.x],
+      [ _2, w6_wyl/2.0*_2,  0,         0, w6_c.y],
+      [  0,             0, _H,         0, w6_c.z],
+      [ _2,-w6_wyl/2.0*_2,  0,         0, w6_c.w],
+      [  0,             0,  0,         0,      1]
+    ]),
+    0xffff00
+  ));
+  applyTex(objects[objects.length - 1], bloodCanalTex, 1, 1, 1);
+  // w7 - blood canals (slanted)
+  objects.push(createHyperwall(
+    new Transform4D([
+      [  0,             0,  0,  R3XL/2.0, w7_c.x],
+      [ _2, w7_wyl/2.0*_2,  0,         0, w7_c.y],
+      [  0,             0, _H,         0, w7_c.z],
+      [ _2,-w7_wyl/2.0*_2,  0,         0, w7_c.w],
+      [  0,             0,  0,         0,      1]
+    ]),
+    0xffff00
+  ));
+  applyTex(objects[objects.length - 1], bloodCanalTex, 1, 1, 1);
+  // w8 - metal end wall
+  objects.push(createHyperwall(
+    new Transform4D([
+      [ 1,        0,  0,                0, w8_c.x],
+      [ 0, R3YL/2.0,  0,                0, w8_c.y],
+      [ 0,        0, _H,                0, w8_c.z],
+      [ 0,        0,  0, (R3WL+w7_dw)/2.0, w8_c.w],
+      [ 0,        0,  0,                0,      1]
+    ]),
+    0x0000ff
+  ));
+  applyTex(objects[objects.length - 1], damMetalTex, 1, 1, 1);
+  objects.push(createHyperwall(
+    new Transform4D([
+      [ 1,        0,  0,                0, w8a_c.x],
+      [ 0, R3YL/2.0,  0,                0, w8a_c.y],
+      [ 0,        0, _H,                0, w8a_c.z],
+      [ 0,        0,  0,        w7_dw/2.0, w8a_c.w],
+      [ 0,        0,  0,                0,      1]
+    ]),
+    0x0000ff
+  ));
+  applyTex(objects[objects.length - 1], damMetalTex, 1, 1, 1);
+  // w9 - metal end wall
+  objects.push(createHyperwall(
+    new Transform4D([
+      [ 1,        0,  0,                0, w9_c.x],
+      [ 0, R3YL/2.0,  0,                0, w9_c.y],
+      [ 0,        0, _H,                0, w9_c.z],
+      [ 0,        0,  0, (R3WL+w7_dw)/2.0, w9_c.w],
+      [ 0,        0,  0,                0,      1]
+    ]),
+    0x0000ff
+  ));
+  applyTex(objects[objects.length - 1], damMetalTex, 1, 1, 1);
+  objects.push(createHyperwall(
+    new Transform4D([
+      [ 1,        0,  0,                0, w9a_c.x],
+      [ 0, R3YL/2.0,  0,                0, w9a_c.y],
+      [ 0,        0, _H,                0, w9a_c.z],
+      [ 0,        0,  0,        w7_dw/2.0, w9a_c.w],
+      [ 0,        0,  0,                0,      1]
+    ]),
+    0x0000ff
+  ));
+  applyTex(objects[objects.length - 1], damMetalTex, 1, 1, 1);
+  // Blocks in wall 1/2 corner - metal
+objects.push(createObstacleCube(new Transform4D([
+    [ obst_x/2.0,        0,  0,        0, obst_c.x - obst_x * -1.5],
+    [  0,    W3B_DY/2.0,  0,        0, obst_c.y],
+    [  0,        0, _H/2.0,        0, obst_c.z + _H/2.0],
+    [  0,        0,  0,W3A_GAP/2.0, obst_c.w],
+    [  0,        0,  0,        0,      1]
+  ]),
+  0x00ff00
+));
+applyTex(objects[objects.length - 1], damMetalTex, 1, 1, 1);
+objects.push(createObstacleCube(new Transform4D([
+    [ obst_x/2.0,        0,  0,        0, obst_c.x - obst_x * 0.5],
+    [  0,    W3B_DY/2.0,  0,        0, obst_c.y],
+    [  0,        0, _H/2.0,        0, obst_c.z + _H/2.0],
+    [  0,        0,  0,W3A_GAP/2.0, obst_c.w],
+    [  0,        0,  0,        0,      1]
+  ]),
+  0x00ff00
+));
+applyTex(objects[objects.length - 1], damMetalTex, 1, 1, 1);
+objects.push(createObstacleCube(new Transform4D([
+    [ obst_x/2.0,        0,  0,        0, obst2_c.x - obst_x * 1.5],
+    [  0,    R3_ENDYL/2.0,  0,        0, obst2_c.y],
+    [  0,        0, _H/2.0,        0, obst2_c.z + _H/2.0],
+    [  0,        0,  0,W3C_DW/2.0, obst2_c.w],
+    [  0,        0,  0,        0,      1]
+  ]),
+  0x00ff00
+));
+applyTex(objects[objects.length - 1], damMetalTex, 1, 1, 1);
+objects.push(createObstacleCube(new Transform4D([
+    [ obst_x/2.0,        0,  0,        0, obst2_c.x - obst_x * -0.5],
+    [  0,    R3_ENDYL/2.0,  0,        0, obst2_c.y],
+    [  0,        0, _H/2.0,        0, obst2_c.z + _H/2.0],
+    [  0,        0,  0,W3C_DW/2.0, obst2_c.w],
+    [  0,        0,  0,        0,      1]
+  ]),
+  0x00ff00
+));
+applyTex(objects[objects.length - 1], damMetalTex, 1, 1, 1);
+// Pillars - metal
+objects.push(createObstacleCube(new Transform4D([
+    [ pill_r,        0,  0,        0, pill_ref.x + obst_x],
+    [  0,    R3_ENDYL/2.0,  0,        0, pill_ref.y],
+    [  0,        0, _H/2.0,        0, pill_ref.z + _H/2.0],
+    [  0,        0,  0,pill_r, pill_ref.w - obst_x],
+    [  0,        0,  0,        0,      1]
+  ]),
+  0x00ff00
+));
+applyTex(objects[objects.length - 1], damMetalTex, 1, 1, 1);
+objects.push(createObstacleCube(new Transform4D([
+    [ pill_r,        0,  0,        0, pill_ref.x - obst_x],
+    [  0,    R3_ENDYL/2.0,  0,        0, pill_ref.y],
+    [  0,        0, _H/2.0,        0, pill_ref.z + _H/2.0],
+    [  0,        0,  0,pill_r, pill_ref.w - obst_x],
+    [  0,        0,  0,        0,      1]
+  ]),
+  0x00ff00
+));
+applyTex(objects[objects.length - 1], damMetalTex, 1, 1, 1);
+objects.push(createObstacleCube(new Transform4D([
+    [ pill_r,        0,  0,        0, pill_ref.x + obst_x],
+    [  0,    R3_ENDYL/2.0,  0,        0, pill_ref.y],
+    [  0,        0, _H/2.0,        0, pill_ref.z + _H/2.0],
+    [  0,        0,  0,pill_r, pill_ref.w + obst_x],
+    [  0,        0,  0,        0,      1]
+  ]),
+  0x00ff00
+));
+applyTex(objects[objects.length - 1], damMetalTex, 1, 1, 1);
+objects.push(createObstacleCube(new Transform4D([
+    [ pill_r,        0,  0,        0, pill_ref.x - obst_x],
+    [  0,    R3_ENDYL/2.0,  0,        0, pill_ref.y],
+    [  0,        0, _H/2.0,        0, pill_ref.z + _H/2.0],
+    [  0,        0,  0,pill_r, pill_ref.w + obst_x],
+    [  0,        0,  0,        0,      1]
+  ]),
+  0x00ff00
+));
+applyTex(objects[objects.length - 1], damMetalTex, 1, 1, 1);
+
+}
+
+// Corridor 6
+// see room 3 diagram for ref point
+const c6_ref = r3_ref.add(new Vector4D(0, R3YL - R3_ENDYL - R3_OUTYL, 0, R3WL + R3_OUTYL));
+const c6_yd = R3_OUTWL;
+const C6_XL = 60.0;
+const C6_WD = c6_yd;
+const c6_c = c6_ref.add(new Vector4D(0, -R3_OUTWL / 2.0, 0, C6_WD/2.0));
+// x+ corridor, hole in -w dir
+createCorridorTubeWithHole(objects, c6_c, new Vector4D(-1,0,0,0), C6_XL, new Vector4D(0,0,0,-1), new Vector4D(0,1,0,0), C6_WD, c6_yd, 0.0, R3_OUTXL, new Vector4D(0,0,1,0), _H, false);
+if (APPLY_TEXTURES) {
+  // Corridor 6 walls: 1a(y+), 1b(y+), 2(x-), 3(y-), 4(x+), 5(endcap)
+  applyTex(objects[objects.length - 6], corridor6PipesTex, 1, 1, 1);
+  applyTex(objects[objects.length - 5], corridor6PipesTex, 1, 1, 1);
+  applyTex(objects[objects.length - 4], corridor6PipesTex, 1, 1, 1);
+  applyTex(objects[objects.length - 3], corridor6PipesTex, 1, 1, 1);
+  applyTex(objects[objects.length - 2], corridor6PipesTex, 1, 1, 1);
+  applyTex(objects[objects.length - 1], corridor6PipesTex, 1, 1, 1);
+}
+// Add Z=0.1 floor with no collider to make the floor 
+objects.push(createHyperwall(
+  new Transform4D([
+    [  0,        0,  C6_XL/2.0,        0, c6_c.x],
+    [  0,      c6_yd/2.0,  0,        0, c6_c.y],
+    [  1,        0,  0,        0, c6_c.z+0.1],
+    [  0,        0,  0,    C6_WD/2.0, c6_c.w],
+    [  0,        0,  0,        0,      1]
+  
+  ]),
+  0x00ff00
+));
+applyTex(objects[objects.length - 1], corridor6PipesTex, 1, 1, 1);
+
+// Room 4         _
+//          /\       
+//        4/  \3     | L
+//    ____/8/\7\     _
+//d |      /|.  \ |  _ c7_ref in the middle of the room
+//    ___. \|   / |
+//   r4ref\5\/6/  v
+//        1\  /2  y
+//          \/
+//       x <-- 
+//
+//       11     12
+//       --------
+//       | |   | | w
+//    -----------  ^
+//      -| |   | | | r4_ref in W middle
+//    ------------  
+//       | |   | |
+//       ----. ---   c7_ref in -W
+//        9      10
+const R4_L = 15.0; // outer reference length
+const R4_YL = 2 * R4_L + 2 *c6_yd;
+const R4_XL = 2 * R4_L + c6_yd;
+const R4_WL = C6_WD * 3;
+const R4_d = c6_yd / 2.0; // half opening
+const R4_l = 10.0; // inner reference length
+const R4_OUTYR = 2.0;
+const C7_DY = 5.0;
+const C7_DX = 5.0;
+const r4_ref = c6_ref.add(new Vector4D(-C6_XL/2.0, 0, 0, C6_WD/2.0)); // in W middle
+const c7_ref = r4_ref.add(new Vector4D(-R4_L, -R4_d, 0, -R4_WL/2.0)); // at -W end, but X, Y middle
+const r4_entrance = r4_ref.add(new Vector4D(0, -R4_d, 0, 0)); 
+const r4_spawn1 = c7_ref.add(new Vector4D(0, 0, 0, C6_WD * 1.5)); // at inner middle of w+ floor
+const r4_spawn2 = c7_ref.add(new Vector4D(0, 0, 0, C6_WD * 2.5));
+const r4_floor_c = c7_ref.add(new Vector4D(-R4_d/2.0, 0, 0, R4_WL/2.0)); 
+if (true) {
+  const w1_xl = R4_L;
+  const w1_yl = R4_L;
+  const w1_xyl = Math.sqrt(w1_xl * w1_xl + w1_yl * w1_yl);
+  const w1_c = r4_ref.add(new Vector4D(-w1_xl/2.0, w1_yl/2.0, 0, 0));
+  const w2_xl = R4_L + R4_d;
+  const w2_yl = R4_L + R4_d;
+  const w2_xyl = Math.sqrt(w2_xl * w2_xl + w2_yl * w2_yl);
+  const w2_c = r4_ref.add(new Vector4D(-w1_xl -w2_xl/2.0, w1_yl - w2_yl/2.0, 0, 0));
+  const ref2 = r4_ref.add(new Vector4D(-w1_xl -w2_xl, w1_yl - w2_yl, 0, 0)); // tip of the room
+  const w3_xl = R4_L + R4_d;
+  const w3_yl = R4_L + R4_d;
+  const w3_xyl = Math.sqrt(w3_xl * w3_xl + w3_yl * w3_yl);
+  const w3_c = ref2.add(new Vector4D(w3_xl/2.0, -w3_yl/2.0, 0, 0));
+  const w4_xl = R4_L;
+  const w4_yl = R4_L;
+  const w4_xyl = Math.sqrt(w4_xl * w4_xl + w4_yl * w4_yl);
+  const w4_c = ref2.add(new Vector4D(w3_xl + w4_xl/2.0, -w3_yl + w4_yl/2.0, 0, 0));
+  const ref3 = c7_ref.add(new Vector4D(R4_l, 0, 0, R4_WL/2.0)); // left tip of inner room
+  const w5_xl = R4_l;
+  const w5_yl = R4_l;
+  const w5_xyl = Math.sqrt(w5_xl * w5_xl + w5_yl * w5_yl);
+  const w5_c = ref3.add(new Vector4D(-w5_xl/2.0, w5_yl/2.0, 0, 0));
+  const w6_xl = R4_l - R4_OUTYR;
+  const w6_yl = R4_l - R4_OUTYR;
+  const w6_xyl = Math.sqrt(w6_xl * w6_xl + w6_yl * w6_yl);
+  const w6_c = ref3.add(new Vector4D(-w5_xl -w6_xl/2.0, w5_yl - w6_yl/2.0, 0, 0));
+  const w8_xl = R4_l;
+  const w8_yl = R4_l;
+  const w8_xyl = Math.sqrt(w8_xl * w8_xl + w8_yl * w8_yl);
+  const w8_c = ref3.add(new Vector4D(-w8_xl/2.0, -w8_yl/2.0, 0, 0));
+  const w7_xl = R4_l - R4_OUTYR;
+  const w7_yl = R4_l - R4_OUTYR;
+  const w7_xyl = Math.sqrt(w7_xl * w7_xl + w7_yl * w7_yl);
+  const w7_c = ref3.add(new Vector4D(-w8_xl -w7_xl/2.0, -w8_yl + w7_yl/2.0, 0, 0));
+  // W- wall with hole
+  const w9_xl = 2 * R4_L;
+  const w9_yl = R4_YL;
+  const w9_c = c7_ref;
+  // W- wall on the side
+  const w10_xl = R4_d;
+  const w10_yl = R4_YL;
+  const w10_c = c7_ref.add(new Vector4D(-R4_L -R4_d / 2.0, 0, 0, 0));
+  // W+ wall in the middle
+  const w11_xl = 2 * R4_L;
+  const w11_yl = R4_YL;
+  const w11_c = c7_ref.add(new Vector4D(0, 0, 0, R4_WL));
+  // W+ wall on the side
+  const w12_xl = R4_d;
+  const w12_yl = R4_YL;
+  const w12_c = c7_ref.add(new Vector4D(-R4_L -R4_d / 2.0, 0, 0, R4_WL));
+  // Temporarily add a square between wall
+  const wt1_xl = 20.0;
+  const wt1_yl = 20.0;
+  const wt1_c = c7_ref.add(new Vector4D(0, 0, 0, R4_WL/3.0));
+  const wt2_xl = 20.0;
+  const wt2_yl = 20.0;
+  const wt2_c = c7_ref.add(new Vector4D(0, 0, 0, 2 * R4_WL/3.0));
+  // wall with hole for entrance
+  const wte_c = r4_ref.add(new Vector4D(0, -R4_d, 0, 0));
+  createHyperwallWithCenterHole(objects,
+    new Transform4D([
+      [ 1,        0,  0,                0, wte_c.x],
+      [ 0,     R4_d,  0,                0, wte_c.y],
+      [ 0,        0, _H,                0, wte_c.z],
+      [ 0,        0,  0,        R4_WL/2.0, wte_c.w],
+      [ 0,        0,  0,                0,      1]
+    ]),
+    R4_d / R4_d,
+    R4_d * 2.0 / R4_WL,
+    0xff0000
+  );
+  for (let i = 4; i >= 1; i--) {
+    applyTex(objects[objects.length - i], room4BioCircuitTex, 1, 1, 1);
+  }
+
+  // w1: bottom-left diagonal
+  objects.push(createHyperwall(
+    new Transform4D([
+      [-_2, w1_xyl/2.0*_2,  0,        0, w1_c.x],
+      [-_2,-w1_xyl/2.0*_2,  0,        0, w1_c.y],
+      [  0,             0, _H,        0, w1_c.z],
+      [  0,             0,  0, R4_WL/2, w1_c.w],
+      [  0,             0,  0,        0,      1]
+    ]),
+    0xff0000
+  ));
+  // w2: bottom-right diagonal
+  objects.push(createHyperwall(
+    new Transform4D([
+      [-_2,-w2_xyl/2.0*_2,  0,        0, w2_c.x],
+      [ _2,-w2_xyl/2.0*_2,  0,        0, w2_c.y],
+      [  0,             0, _H,        0, w2_c.z],
+      [  0,             0,  0, R4_WL/2, w2_c.w],
+      [  0,             0,  0,        0,      1]
+    ]),
+    0xff7700
+  ));
+  // w3: top-right diagonal
+  objects.push(createHyperwall(
+    new Transform4D([
+      [ _2,-w3_xyl/2.0*_2,  0,        0, w3_c.x],
+      [ _2, w3_xyl/2.0*_2,  0,        0, w3_c.y],
+      [  0,             0, _H,        0, w3_c.z],
+      [  0,             0,  0, R4_WL/2, w3_c.w],
+      [  0,             0,  0,        0,      1]
+    ]),
+    0xffff00
+  ));
+  // w4: top-left diagonal
+  objects.push(createHyperwall(
+    new Transform4D([
+      [ _2, w4_xyl/2.0*_2,  0,        0, w4_c.x],
+      [-_2, w4_xyl/2.0*_2,  0,        0, w4_c.y],
+      [  0,             0, _H,        0, w4_c.z],
+      [  0,             0,  0, R4_WL/2, w4_c.w],
+      [  0,             0,  0,        0,      1]
+    ]),
+    0x00ff00
+  ));
+  // w5: inner bottom-left diagonal
+  objects.push(createHyperwall(
+    new Transform4D([
+      [ _2,-w5_xyl/2.0*_2,  0,        0, w5_c.x],
+      [ _2, w5_xyl/2.0*_2,  0,        0, w5_c.y],
+      [  0,             0, _H,        0, w5_c.z],
+      [  0,             0,  0, R4_WL/2, w5_c.w],
+      [  0,             0,  0,        0,      1]
+    ]),
+    0x00ffff
+  ));
+  // w6: inner bottom-right diagonal
+  objects.push(createHyperwall(
+    new Transform4D([
+      [ _2, w6_xyl/2.0*_2,  0,        0, w6_c.x],
+      [-_2, w6_xyl/2.0*_2,  0,        0, w6_c.y],
+      [  0,             0, _H,        0, w6_c.z],
+      [  0,             0,  0, R4_WL/2, w6_c.w],
+      [  0,             0,  0,        0,      1]
+    ]),
+    0x0077ff
+  ));
+  // w7: inner top-right diagonal
+  objects.push(createHyperwall(
+    new Transform4D([
+      [ _2, w7_xyl/2.0*_2,  0,        0, w7_c.x],
+      [ _2,-w7_xyl/2.0*_2,  0,        0, w7_c.y],
+      [  0,             0, _H,        0, w7_c.z],
+      [  0,             0,  0, R4_WL/2, w7_c.w],
+      [  0,             0,  0,        0,      1]
+    ]),
+    0x77ff00
+  ));
+  // w8: inner top-left diagonal
+  objects.push(createHyperwall(
+    new Transform4D([
+      [ _2,-w8_xyl/2.0*_2,  0,        0, w8_c.x],
+      [-_2,-w8_xyl/2.0*_2,  0,        0, w8_c.y],
+      [  0,             0, _H,        0, w8_c.z],
+      [  0,             0,  0, R4_WL/2, w8_c.w],
+      [  0,             0,  0,        0,      1]
+    ]),
+    0x7700ff
+  ));
+  for (let i = 8; i >= 1; i--) {
+    applyTex(objects[objects.length - i], room4BioCircuitTex, 1, 1, 1);
+  }
+  // w9: W- wall with hole (center)
+  const h1f1 = C7_DX / w9_xl;
+  const h1f2 = C7_DY / w9_yl;
+  createHyperwallWithCenterHole(
+    objects,
+    new Transform4D([
+      [  0, w9_xl/2.0,  0,        0, w9_c.x],
+      [  0,        0,  0, w9_yl/2, w9_c.y],
+      [  0,        0, _H,        0, w9_c.z],
+      [ -1,        0,  0,        0, w9_c.w],
+      [  0,        0,  0,        0,      1]
+    ]),
+    h1f1, h1f2,
+    0x0000ff
+  );
+  for (let i = 4; i >= 1; i--) {
+    applyTex(objects[objects.length - i], room2PipesTex, 1, 1, 1);
+  }
+  // w10: W- wall on the side
+  objects.push(createHyperwall(
+    new Transform4D([
+      [  0, w10_xl/2.0,  0,         0, w10_c.x],
+      [  0,         0,  0, w10_yl/2, w10_c.y],
+      [  0,         0, _H,         0, w10_c.z],
+      [ -1,         0,  0,         0, w10_c.w],
+      [  0,         0,  0,         0,       1]
+    ]),
+    0x000077
+  ));
+  applyTex(objects[objects.length - 1], room2PipesTex, 1, 1, 1);
+  // w11: W+ wall in the middle
+  objects.push(createHyperwall(
+    new Transform4D([
+      [  0, w11_xl/2.0,  0,         0, w11_c.x],
+      [  0,         0,  0, w11_yl/2, w11_c.y],
+      [  0,         0, _H,         0, w11_c.z],
+      [  1,         0,  0,         0, w11_c.w],
+      [  0,         0,  0,         0,       1]
+    ]),
+    0x0000ff
+  ));
+  applyTex(objects[objects.length - 1], room2PipesTex, 1, 1, 1);
+  // w12: W+ wall on the side
+  objects.push(createHyperwall(
+    new Transform4D([
+      [  0, w12_xl/2.0,  0,         0, w12_c.x],
+      [  0,         0,  0, w12_yl/2, w12_c.y],
+      [  0,         0, _H,         0, w12_c.z],
+      [  1,         0,  0,         0, w12_c.w],
+      [  0,         0,  0,         0,       1]
+    ]),
+    0x000077
+  ));
+  applyTex(objects[objects.length - 1], room2PipesTex, 1, 1, 1);
+  // temporary floors
+  objects.push(createHyperwall(
+    new Transform4D([
+      [  0, wt1_xl/2.0,  0,         0, wt1_c.x],
+      [  0,         0,  0, wt1_yl/2, wt1_c.y],
+      [  0,         0, _H,         0, wt1_c.z],
+      [  1,         0,  0,         0, wt1_c.w],
+      [  0,         0,  0,         0,       1]
+    ]),
+    0x0000ff
+  ));
+  applyTex(objects[objects.length - 1], room2PipesTex, 1, 1, 1);
+  objects.push(createHyperwall(
+    new Transform4D([
+      [  0, wt2_xl/2.0,  0,         0, wt2_c.x],
+      [  0,         0,  0, wt2_yl/2, wt2_c.y],
+      [  0,         0, _H,         0, wt2_c.z],
+      [  1,         0,  0,         0, wt2_c.w],
+      [  0,         0,  0,         0,       1]
+    ]),
+    0x0000ff
+  ));
+  applyTex(objects[objects.length - 1], room2PipesTex, 1, 1, 1);
+  // Also add a custom floor
+  objects.push(createHyperwall(
+    new Transform4D([
+      [  0,        0,  (R4_XL-R4_d)/2.0,        0, r4_floor_c.x],
+      [  0,      R4_YL/2.0,  0,        0, r4_floor_c.y],
+      [  1,        0,  0,        0, r4_floor_c.z+0.1],
+      [  0,        0,  0, (R4_WL+10)/2.0, r4_floor_c.w],
+      [  0,        0,  0,        0,      1]
+    
+    ]),
+    0x00ff00
+  ));
+  objects[objects.length - 1].collider = false;
+  applyTex(objects[objects.length - 1], corridor6PipesTex, 1, 1, 1);
+}
+
+// Corridor 7, -W direction
+const C7_LW = 10.0;
+const c7_c = c7_ref.add(new Vector4D(0, 0, 0, -C7_LW/2.0));
+createCorridorTube(objects, c7_c, new Vector4D(0,0,0,-1), C7_LW, new Vector4D(1,0,0,0), new Vector4D(0,1,0,0), C7_DX, C7_DY, _H);
+applyTex(objects[objects.length - 1], fallTex, 0.1, 1, 1);
+applyTex(objects[objects.length - 2], fallTex, 0.1, 1, 1);
+applyTex(objects[objects.length - 3], fallTex, 0.1, 1, 1);
+applyTex(objects[objects.length - 4], fallTex, 0.1, 1, 1);
+
+// Room 5
+//   ___
+//   |  xxxx
+// --   xxxx
+// --             | y
+//   |__xxxx      v
+//  w <--
+
+const R5_WL = 60.0;
+const R5_DX = 20.0;
+const R5_DY = 20.0;
+const R5_BX = 5.0;
+const R5_BY = 5.0;
+const R5_BZ = 0.5;
+const R5_BoffsetX = 6.0;
+const R5_BoffsetY = 7.0;
+const R5_LAVA_WL = 30.0;
+const R5_BWL = 35.0;
+const C8_LW = 10.0;
+const C8_DX = 10.0;
+const C8_DY = 10.0;
+const r5_shore_wl = (R5_WL - R5_LAVA_WL) / 2.0;
+const r5_entrance = c7_c.add(new Vector4D(0, 0, 0, -C7_LW/2.0));
+const r5_c = r5_entrance.add(new Vector4D(0, 0, 0, -R5_WL/2.0));
+const r5_firstshore_c = r5_entrance.add(new Vector4D(0, 0, 0, -r5_shore_wl/2.0));
+const r5_secondshore_c = r5_c.add(new Vector4D(0, 0, 0, -R5_LAVA_WL/2.0 -r5_shore_wl/2.0));
+const r5_bc = r5_c.add(new Vector4D(R5_BoffsetX, R5_BoffsetY, 0, R5_BZ/2.0, 0));
+const r5_exit = r5_c.add(new Vector4D(0, 0, 0, -R5_WL/2.0));
+if (true) {
+  const h1f1 = C7_DX / R5_DX;
+  const h1f2 = C7_DY / R5_DY;
+  createHyperwallWithCenterHole(objects,
+      new Transform4D([
+          [0, R5_DX/2.0,  0,       0, r5_entrance.x],
+          [0,         0,  0, R5_DY/2, r5_entrance.y],
+          [0,         0, _H,       0, r5_entrance.z],
+          [1,         0,  0,       0, r5_entrance.w],
+          [0,         0,  0,       0, 1]
+      ]),
+      h1f1, h1f2,
+      0xff0000
+  );
+  for (let i = 4; i >= 1; i--) {
+    applyTex(objects[objects.length - i], room5RockTex, 1, 1, 1);
+  }
+  createCorridorTube(objects, r5_firstshore_c, new Vector4D(0,0,0,-1), r5_shore_wl, new Vector4D(1,0,0,0), new Vector4D(0,1,0,0), R5_DX, R5_DY, _H);
+  for (let i = 4; i >= 1; i--) {
+    applyTex(objects[objects.length - i], room5RockTex, 1, 1, 1);
+  }
+  // Stop the player from jumping out
+  const r5_firstedge_c = r5_firstshore_c.add(new Vector4D(0, 0, 0, -r5_shore_wl/2.0));
+  createHyperwallWithCenterHole(objects,
+      new Transform4D([
+          [0, R5_DX/2.0*2,  0,       0, r5_firstedge_c.x],
+          [0,         0,  0, R5_DY/2*2, r5_firstedge_c.y],
+          [0,         0, _H,       0, r5_firstedge_c.z],
+          [1,         0,  0,       0, r5_firstedge_c.w],
+          [0,         0,  0,       0, 1]
+      ]),
+      1.0/2.0, 1.0/2.0,
+      0xff0000
+  );
+  for (let i = 4; i >= 1; i--) {
+    applyTex(objects[objects.length - i], room5RockTex, 1, 1, 1);
+  }
+  // Invisible walls to stop the player from going through the lava
+  createCorridorTube(objects, r5_c, new Vector4D(0,0,0,-1), R5_LAVA_WL, new Vector4D(1,0,0,0), new Vector4D(0,1,0,0), R5_DX*2, R5_DY*2, _H);
+  objects[objects.length - 4].tetras = []; // make wall invisible but keep collider
+  objects[objects.length - 3].tetras = []; // make wall invisible but keep collider
+  objects[objects.length - 2].tetras = []; // make wall invisible but keep collider
+  objects[objects.length - 1].tetras = []; // make wall invisible but keep collider
+  // Lava surface rendered by floor shader
+  // Lava river is long in Y direction
+  // Add +x and -x wall
+  const r5_xp_c = r5_c.add(new Vector4D(R5_DX/2.0 * 2.0, 0, 0, 0));
+  const r5_xm_c = r5_c.add(new Vector4D(-R5_DX/2.0 * 2.0, 0, 0, 0));
+  objects.push(createHyperwall(
+    new Transform4D([
+      [  1,         0,  0,         0, r5_xp_c.x],
+      [  0, R5_DY,  0,         0, r5_xp_c.y],
+      [  0,         0, _H,         0, r5_xp_c.z],
+      [  0,         0,  0, R5_LAVA_WL/2.0, r5_xp_c.w],
+      [  0,         0,  0,         0,       1]
+    ]),
+    0xffff00
+  ));
+  applyTex(objects[objects.length - 1], obsidianBridgeTex, 1, 1, 1);
+  // objects.push(createHyperwall(
+  //   new Transform4D([
+  //     [  1,         0,  0,         0, r5_xm_c.x],
+  //     [  0, R5_DY,  0,         0, r5_xm_c.y],
+  //     [  0,         0, _H,         0, r5_xm_c.z],
+  //     [  0,         0,  0, R5_LAVA_WL/2.0, r5_xm_c.w],
+  //     [  0,         0,  0,         0,       1]
+  //   ]),
+  //   0xffff00
+  // ));
+  // Second shore wall
+  createCorridorTube(objects, r5_secondshore_c, new Vector4D(0,0,0,-1), r5_shore_wl, new Vector4D(1,0,0,0), new Vector4D(0,1,0,0), R5_DX, R5_DY, _H);
+  for (let i = 4; i >= 1; i--) {
+    applyTex(objects[objects.length - i], room5RockTex, 1, 1, 1);
+  }
+  // Bridge
+  objects.push(createHypercube(
+    new Transform4D([
+      [ R5_BX/2.0,         0,         0,              0,  r5_bc.x],
+      [         0, R5_BY/2.0,         0,              0,  r5_bc.y],
+      [         0,         0, R5_BZ/2.0,              0,  r5_bc.z],
+      [         0,         0,         0, R5_BWL/2.0,  r5_bc.w],
+      [         0,         0,         0,              0,  1]
+    ]),
+    0x222222
+  ));
+  applyTex(objects[objects.length - 1], obsidianBridgeTex, 1, 1, 1);
+  objects[objects.length-1].simulate_physics = false; // static object
+  // To make the player's life easier, add a monolith at the first bridge entrance
+  const r5_m1_r = 2.0;
+  const r5_m1_h = 3.0;
+  const r5_m1c = r5_bc.add(new Vector4D(0, 0, _H + r5_m1_h/2.0, R5_LAVA_WL/2.0));
+  objects.push(createHypercube(
+    new Transform4D([
+      [ r5_m1_r,         0,         0,              0,  r5_m1c.x],
+      [         0, r5_m1_r,         0,              0,  r5_m1c.y],
+      [         0,         0, r5_m1_h/2.0,          0,  r5_m1c.z],
+      [         0,         0,         0,      r5_m1_r,  r5_m1c.w],
+      [         0,         0,         0,              0,  1]
+    ]),
+    0x222222
+  ));
+  applyTex(objects[objects.length - 1], obsidianGemMonolithTex, 1, 1, 1);
+  objects[objects.length-1].simulate_physics = false; // static object
+  // Stop the player from jumping out
+  const r5_secondedge_c = r5_secondshore_c.add(new Vector4D(0, 0, 0, r5_shore_wl/2.0));
+  createHyperwallWithCenterHole(objects,
+      new Transform4D([
+          [0, R5_DX/2.0*2,  0,       0, r5_secondedge_c.x],
+          [0,         0,  0, R5_DY/2*2, r5_secondedge_c.y],
+          [0,         0, _H,       0, r5_secondedge_c.z],
+          [1,         0,  0,       0, r5_secondedge_c.w],
+          [0,         0,  0,       0, 1]
+      ]),
+      1.0/2.0, 1.0/2.0,
+      0xff0000
+  );
+  for (let i = 4; i >= 1; i--) {
+    applyTex(objects[objects.length - i], room5RockTex, 1, 1, 1);
+  }
+  // End wall
+  createHyperwallWithCenterHole(objects,
+      new Transform4D([
+          [0, R5_DX/2.0,  0,       0, r5_exit.x],
+          [0,         0,  0, R5_DY/2, r5_exit.y],
+          [0,         0, _H,       0, r5_exit.z],
+          [1,         0,  0,       0, r5_exit.w],
+          [0,         0,  0,       0, 1]
+      ]),
+      C8_DX / R5_DX,
+      C8_DY / R5_DY,
+      0xff0000
+  );
+  for (let i = 4; i >= 1; i--) {
+    applyTex(objects[objects.length - i], room5RockTex, 1, 1, 1);
+  }
+}
+
+// Corridor 8
+const c8_c = r5_exit.add(new Vector4D(0, 0, 0, -C8_LW/2.0));
+createCorridorTube(objects, c8_c, new Vector4D(0,0,0,-1), C8_LW, new Vector4D(1,0,0,0), new Vector4D(0,1,0,0), C8_DX, C8_DY, _H);
+for (let i = 4; i >= 1; i--) {
+  applyTex(objects[objects.length - i], room5RockTex, 1, 1, 1);
+}
+
+// Room 6
+const R6_R = 60.0;
+const R6_LavaR = 45.0;
+const R6_CutW = 2.0;
+const R6_BridgeShellR = 30.0;
+const R6_BridgeShellHZ = 0.3;
+const R6_PedestalR = 7.0;
+const R6_PedestalHZ = 1.0;
+const r6_entrance = r5_exit.add(new Vector4D(0, 0, 0, -C8_LW));
+const r6_c = r6_entrance.add(new Vector4D(0, 0, 0, -R6_R + R6_CutW));
+// Connect Outer Shore to Spherical Bridge (x+)
+const r6_b1_lx = R6_R - R6_BridgeShellR - 5.0;
+const r6_b1_r = R5_BX / 2.0;
+const r6_b1c = r6_c.add(new Vector4D(r6_b1_lx/2.0 + R6_BridgeShellR, 0, 0, 0));
+// To make the player's life easier, add a monolith at the first bridge entrance
+const r6_m1_r = 2.0;
+const r6_m1_h = 3.0;
+const r6_m1c = r6_c.add(new Vector4D(r6_b1_lx + R6_BridgeShellR - 10.0, 0, _H + r6_m1_h/2.0, 0));
+// Connect Spherical Bridge To Pedestal (y+)
+const r6_b2_ly = R6_BridgeShellR;
+const r6_b2_r = R5_BX / 2.0;
+const r6_b2c = r6_c.add(new Vector4D(0, r6_b2_ly/2.0, 0, 0));
+// To make the player's life easier, add a monolith at the first bridge entrance
+const r6_m2_r = 2.0;
+const r6_m2_h = 3.0;
+const r6_m2c = r6_c.add(new Vector4D(0, r6_b2_ly, _H + r6_m2_h/2.0, 0));
+let magicWallIndex = null;
+let bossEntranceWallIdx = null;
+if (true) {
+  // Entrance wall
+  const innerR = R6_R * 0.4;
+  const h1f1 = C8_DX / innerR / 2.0;
+  const h1f2 = C8_DY / innerR / 2.0;
+  createHyperwallWithCenterHole(objects,
+      new Transform4D([
+          [0,  innerR,  0,       0, r6_entrance.x],
+          [0,         0,  0,  innerR, r6_entrance.y],
+          [0,         0, _H,       0, r6_entrance.z],
+          [1,         0,  0,       0, r6_entrance.w],
+          [0,         0,  0,       0, 1]
+      ]),
+      h1f1, h1f2,
+      0xff0000
+  );
+  for (let i = 4; i >= 1; i--) {
+    applyTex(objects[objects.length - i], starryTex, 1, 1, 1);
+  }
+  // Magic wall at boss room entrance (blocks player from leaving once inside)
+  bossEntranceWallIdx = objects.length;
+  objects.push(createHyperwall(
+    new Transform4D([
+      [0,  C8_DX/2.0,  0,         0, r5_exit.x],
+      [0,          0,  0, C8_DY/2.0, r5_exit.y],
+      [0,          0, _H,         0, r5_exit.z],
+      [1,          0,  0,         0, r5_exit.w],
+      [0,          0,  0,         0, 1]
+    ]),
+    0xffff00
+  ));
+  // outer wall
+  objects.push(createSphericalWallWithHole(new Transform4D([
+        [         0,         0,         0,           R6_R,  r6_c.x],
+        [         0,      R6_R,         0,              0,  r6_c.y],
+        [         0,         0,        _H,              0,  r6_c.z],
+        [      R6_R,         0,         0,              0,  r6_c.w],
+        [         0,         0,         0,              0,  1]
+    ]), 
+    R6_CutW / R6_R,
+    0x00ffff
+  ));
+  if (APPLY_TEXTURES) {
+    const bossWall = objects[objects.length - 1];
+    bossWall.texture = starryTex.texture;
+    bossWall.texture_info = starryTex.texture_info;
+  }
+  // Outer spherical wall for aesthetics
+  objects.push(createSphericalWallWithHole(new Transform4D([
+        [         0,         0,         0,           R6_R*1.4,  r6_c.x],
+        [         0,      R6_R*1.4,         0,              0,  r6_c.y],
+        [         0,         0,        _H,              0,  r6_c.z],
+        [      R6_R*1.4,         0,         0,              0,  r6_c.w],
+        [         0,         0,         0,              0,  1]
+    ]), 
+    R6_CutW / R6_R,
+    0x00ffff
+  ));
+  objects[objects.length - 1].collider = null;
+  applyTex(objects[objects.length - 1], room5RockTex, 1, 1, 1);
+  // Lava rendered by floor shader
+  // Spherical Bridge
+  objects.push(createSphericalBridge(new Transform4D([
+        [         0,         0,         0,       R6_BridgeShellR,  r6_c.x],
+        [         0,  R6_BridgeShellR,         0,              0,  r6_c.y],
+        [         0,         0, R6_BridgeShellHZ,              0,         r6_c.z],
+        [  R6_BridgeShellR,         0,         0,              0,  r6_c.w], // We give this the same rotation as the outer wall to match the discontinuities
+        [         0,         0,         0,              0,  1]
+    ]),
+    0.9, 1.1,
+    0x222222
+  ));
+  // Connect Outer Shore to Spherical Bridge (x+)
+  objects.push(createHypercube(
+    new Transform4D([
+      [ r6_b1_lx/2.0,         0,         0,              0,  r6_b1c.x],
+      [         0, r6_b1_r,         0,              0,  r6_b1c.y],
+      [         0,         0, R5_BZ/2.0,              0,  r6_b1c.z],
+      [         0,         0,         0, r6_b1_r,  r6_b1c.w],
+      [         0,         0,         0,              0,  1]
+    ]),
+    0x222222
+  ));
+  applyTex(objects[objects.length - 1], obsidianBridgeTex, 1, 1, 1);
+  objects[objects.length-1].simulate_physics = false; // static object
+  // Magic wall across bridge 1 that disappears when boss is dead
+  magicWallIndex = objects.length;
+  objects.push(createHyperwall(
+    new Transform4D([
+      [  1,         0,  0,         0, r6_b1c.x],
+      [  0, r6_b1_r*2.0,  0,         0, r6_b1c.y],
+      [  0,         0, _H,         0, r6_b1c.z],
+      [  0,         0,  0, r6_b1_r*2.0, r6_b1c.w],
+      [  0,         0,  0,         0,       1]
+    ]),
+    0xffff00
+  ));
+
+  // To make the player's life easier, add a monolith at the first bridge entrance
+  objects.push(createHypercube(
+    new Transform4D([
+      [ r6_m1_r,         0,         0,              0,  r6_m1c.x],
+      [         0, r6_m1_r,         0,              0,  r6_m1c.y],
+      [         0,         0, r6_m1_h/2.0,              0,  r6_m1c.z],
+      [         0,         0,         0, r6_m1_r,  r6_m1c.w],
+      [         0,         0,         0,              0,  1]
+    ]),
+    0x222222
+  ));
+  applyTex(objects[objects.length - 1], obsidianGemMonolithTex, 1, 1, 1);
+  objects[objects.length-1].simulate_physics = false; // static object
+  // Connect Spherical Bridge To Pedestal (y+)
+  objects.push(createHypercube(
+    new Transform4D([
+      [ r6_b2_r,         0,         0,              0,  r6_b2c.x],
+      [         0, r6_b2_ly/2.0,         0,              0,  r6_b2c.y],
+      [         0,         0, R5_BZ/2.0,              0,  r6_b2c.z],
+      [         0,         0,         0, r6_b2_r,  r6_b2c.w],
+      [         0,         0,         0,              0,  1]
+    ]),
+    0x222222
+  ));
+  applyTex(objects[objects.length - 1], obsidianBridgeTex, 1, 1, 1);
+  objects[objects.length-1].simulate_physics = false; // static object
+  // To make the player's life easier, add a monolith at the first bridge entrance
+  objects.push(createHypercube(
+    new Transform4D([
+      [ r6_m2_r,         0,         0,              0,  r6_m2c.x],
+      [         0, r6_m2_r,         0,              0,  r6_m2c.y],
+      [         0,         0, r6_m2_h/2.0,              0,  r6_m2c.z],
+      [         0,         0,         0, r6_m2_r,  r6_m2c.w],
+      [         0,         0,         0,              0,  1]
+    ]),
+    0x222222
+  ));
+  applyTex(objects[objects.length - 1], obsidianGemMonolithTex, 1, 1, 1);
+  objects[objects.length-1].simulate_physics = false; // static object
+
+  // Pedestal
+  objects.push(createSphericalBridge(new Transform4D([
+        [         0,         0,         0,       R6_PedestalR,  r6_c.x],
+        [         0,  R6_PedestalR,         0,              0,  r6_c.y],
+        [         0,         0, R6_PedestalHZ,              0,         r6_c.z],
+        [  R6_PedestalR,         0,         0,              0,  r6_c.w], // We give this the same rotation as the outer wall to match the discontinuities
+        [         0,         0,         0,              0,  1]
+    ]),
+    0.2, 1.0,
+    0x222222
+  ));
+  // End gem - created by the game manager
+}
+
+
+function the_bargain_floor_heightmap(x, y, w) {
+  if (x >= area1xmin && x <= area1xmax && y >= area1ymin && y <= area1ymax && w >= area1wmin && w <= area1wmax) {
+    return AREA1_ZH;
+  }
+  return 0.0;
+}
+
+// Check WebGPU support
+if (!navigator.gpu) {
+  document.body.innerHTML = '<div style="color: red; padding: 20px;">WebGPU is not supported in your browser.</div>';
+  throw new Error('WebGPU not supported');
+}
+
+// Floor shader with lava lakes
+const bargainFloorShader = `
+    if (true) {
+    let ray_origin_in_world = hypercameraPoseBuffer.tr;
+    let ray_direction_in_world = vec4<f32>(
+        hypercameraPoseBuffer.r0.x * 1.0 + hypercameraPoseBuffer.r1.x * u + hypercameraPoseBuffer.r2.x * v + hypercameraPoseBuffer.r3.x * l,
+        hypercameraPoseBuffer.r0.y * 1.0 + hypercameraPoseBuffer.r1.y * u + hypercameraPoseBuffer.r2.y * v + hypercameraPoseBuffer.r3.y * l,
+        hypercameraPoseBuffer.r0.z * 1.0 + hypercameraPoseBuffer.r1.z * u + hypercameraPoseBuffer.r2.z * v + hypercameraPoseBuffer.r3.z * l,
+        hypercameraPoseBuffer.r0.w * 1.0 + hypercameraPoseBuffer.r1.w * u + hypercameraPoseBuffer.r2.w * v + hypercameraPoseBuffer.r3.w * l
+    );
+    let denominator = ray_direction_in_world.z;
+    if (abs(denominator) > 1e-6) {
+        let t = -ray_origin_in_world.z / denominator;
+        if (t > 0.0) {
+            let intersect_point = vec4<f32>(
+                ray_origin_in_world.x + t * ray_direction_in_world.x,
+                ray_origin_in_world.y + t * ray_direction_in_world.y,
+                0.0,
+                ray_origin_in_world.w + t * ray_direction_in_world.w
+            );
+            let x = intersect_point.x;
+            let y = intersect_point.y;
+            let w = intersect_point.w;
+
+            // Check lava regions
+            var is_lava = false;
+
+            // Room 5 lava: rectangular region in W
+            let r5_cx = f32(${r5_c.x});
+            let r5_cy = f32(${r5_c.y});
+            let r5_cw = f32(${r5_c.w});
+            let r5_hw = f32(${R5_LAVA_WL / 2.0});
+            let r5_hx = f32(${R5_DX / 2.0 * 3});
+            let r5_hy = f32(${R5_DY / 2.0 * 100});
+            if (abs(x - r5_cx) < r5_hx && abs(y - r5_cy) < r5_hy && abs(w - r5_cw) < r5_hw) {
+                is_lava = true;
+            }
+
+            // Room 6 lava: spherical region
+            let r6_cx = f32(${r6_c.x});
+            let r6_cy = f32(${r6_c.y});
+            let r6_cw = f32(${r6_c.w});
+            let r6_r = f32(${R6_LavaR});
+            let r6_dx = x - r6_cx;
+            let r6_dy = y - r6_cy;
+            let r6_dw = w - r6_cw;
+            if (r6_dx*r6_dx + r6_dy*r6_dy + r6_dw*r6_dw < r6_r*r6_r) {
+                is_lava = true;
+            }
+
+            if (is_lava) {
+                // Animated lava effect
+                let wave1 = sin(x * 0.6 + sim_t * 0.5) * 0.5 + 0.5;
+                let wave2 = sin(y * 0.45 - sim_t * 0.3) * 0.5 + 0.5;
+                let wave3 = sin(w * 0.54 + sim_t * 0.7) * 0.5 + 0.5;
+                let wave = (wave1 + wave2 + wave3) / 3.0;
+                var lava_r = 0.8 + 0.2 * wave;
+                var lava_g = 0.3 * wave;
+                var lava_b = 0.0;
+
+                // Bubbles - two layers at different scales
+                var bubble_add = 0.0;
+
+                // Layer 1: small frequent bubbles
+                let bc1 = 3.0;
+                let b1cx = floor(x / bc1);
+                let b1cy = floor(y / bc1);
+                let b1cw = floor(w / bc1);
+                let b1h1 = fract(sin(b1cx * 127.1 + b1cw * 311.7 + b1cy * 74.7) * 43758.5453);
+                let b1h2 = fract(sin(b1cx * 269.5 + b1cw * 183.3 + b1cy * 246.1) * 43758.5453);
+                let b1h3 = fract(sin(b1cx * 419.2 + b1cw * 371.9 + b1cy * 519.3) * 43758.5453);
+                let b1h4 = fract(sin(b1cx * 547.3 + b1cw * 157.9 + b1cy * 323.7) * 43758.5453);
+                let b1x = (b1cx + 0.2 + b1h1 * 0.6) * bc1;
+                let b1y = (b1cy + 0.2 + b1h2 * 0.6) * bc1;
+                let b1w = (b1cw + 0.2 + b1h3 * 0.6) * bc1;
+                let b1per = 3.0 + b1h4 * 7.0;
+                let b1ph = fract((sim_t + b1h1 * 100.0) / b1per);
+                let b1rad = 0.15 + b1h2 * 0.35;
+                let b1d = sqrt((x-b1x)*(x-b1x) + (y-b1y)*(y-b1y) + (w-b1w)*(w-b1w));
+                var b1sz = 0.0;
+                if (b1ph < 0.3) { b1sz = b1ph / 0.3; }
+                else if (b1ph < 0.5) { b1sz = 1.0; }
+                else if (b1ph < 0.7) { b1sz = 1.0 - (b1ph - 0.5) / 0.2; }
+                let b1er = b1rad * b1sz;
+                if (b1d < b1er && b1er > 0.01) {
+                    let b1e = b1d / b1er;
+                    bubble_add = max(bubble_add, (1.0 - b1e * b1e) * 0.5);
+                }
+
+                // Layer 2: larger rare bubbles
+                let bc2 = 7.0;
+                let b2cx = floor(x / bc2);
+                let b2cy = floor(y / bc2);
+                let b2cw = floor(w / bc2);
+                let b2h1 = fract(sin(b2cx * 213.7 + b2cw * 491.3 + b2cy * 167.1) * 43758.5453);
+                let b2h2 = fract(sin(b2cx * 337.9 + b2cw * 259.1 + b2cy * 413.7) * 43758.5453);
+                let b2h3 = fract(sin(b2cx * 571.3 + b2cw * 643.7 + b2cy * 389.1) * 43758.5453);
+                let b2h4 = fract(sin(b2cx * 691.1 + b2cw * 823.3 + b2cy * 197.9) * 43758.5453);
+                let b2x = (b2cx + 0.15 + b2h1 * 0.7) * bc2;
+                let b2y = (b2cy + 0.15 + b2h2 * 0.7) * bc2;
+                let b2w = (b2cw + 0.15 + b2h3 * 0.7) * bc2;
+                let b2per = 5.0 + b2h4 * 10.0;
+                let b2ph = fract((sim_t + b2h1 * 100.0) / b2per);
+                let b2rad = 0.4 + b2h2 * 0.6;
+                let b2d = sqrt((x-b2x)*(x-b2x) + (y-b2y)*(y-b2y) + (w-b2w)*(w-b2w));
+                var b2sz = 0.0;
+                if (b2ph < 0.3) { b2sz = b2ph / 0.3; }
+                else if (b2ph < 0.5) { b2sz = 1.0; }
+                else if (b2ph < 0.7) { b2sz = 1.0 - (b2ph - 0.5) / 0.2; }
+                let b2er = b2rad * b2sz;
+                if (b2d < b2er && b2er > 0.01) {
+                    let b2e = b2d / b2er;
+                    bubble_add = max(bubble_add, (1.0 - b2e * b2e) * 0.7);
+                }
+
+                lava_r = min(1.0, lava_r + bubble_add);
+                lava_g = min(1.0, lava_g + bubble_add * 0.7);
+                lava_b = min(0.3, lava_b + bubble_add * 0.15);
+
+                best_voxel.r = lava_r;
+                best_voxel.g = lava_g;
+                best_voxel.b = lava_b;
+            } else {
+                // 3D BCC Voronoi cells (truncated-octahedron honeycomb), with
+                // gentle warp + per-cell jitter to avoid rigid grid alignment.
+                let cell_size = 3.6;
+                let p0 = vec3<f32>(
+                    x * 0.83 + y * 0.31 + w * 0.19,
+                   -x * 0.27 + y * 0.89 + w * 0.37,
+                   -x * 0.21 - y * 0.34 + w * 0.92
+                ) / cell_size;
+                let warp = vec3<f32>(
+                    sin(p0.y * 1.30 + p0.z * 0.90 + 0.5),
+                    sin(p0.z * 1.10 + p0.x * 1.40 + 1.7),
+                    sin(p0.x * 0.80 + p0.y * 1.20 + 2.9)
+                ) * 0.15;
+                let p = p0 + warp;
+                let bx = i32(floor(p.x));
+                let by = i32(floor(p.y));
+                let bz = i32(floor(p.z));
+
+                var d1 = 1e9;
+                var d2 = 1e9;
+                for (var dz = -1; dz <= 1; dz = dz + 1) {
+                    for (var dy = -1; dy <= 1; dy = dy + 1) {
+                        for (var dx = -1; dx <= 1; dx = dx + 1) {
+                            let cx = bx + dx;
+                            let cy = by + dy;
+                            let cz = bz + dz;
+                            let fcx = f32(cx);
+                            let fcy = f32(cy);
+                            let fcz = f32(cz);
+
+                            let hax = fract(sin(fcx * 127.1 + fcy * 311.7 + fcz * 74.7 + 13.0) * 43758.5453);
+                            let hay = fract(sin(fcx * 269.5 + fcy * 183.3 + fcz * 246.1 + 29.0) * 24634.6345);
+                            let haz = fract(sin(fcx * 419.2 + fcy * 371.9 + fcz * 519.3 + 47.0) * 35311.3147);
+                            let ja = (vec3<f32>(hax, hay, haz) - vec3<f32>(0.5, 0.5, 0.5)) * 0.18;
+                            let pa = vec3<f32>(fcx, fcy, fcz) + ja;
+                            let da = dot(p - pa, p - pa);
+                            if (da < d1) {
+                                d2 = d1;
+                                d1 = da;
+                            } else if (da < d2) {
+                                d2 = da;
+                            }
+
+                            let hbx = fract(sin(fcx * 547.3 + fcy * 157.9 + fcz * 323.7 + 71.0) * 43758.5453);
+                            let hby = fract(sin(fcx * 213.7 + fcy * 491.3 + fcz * 167.1 + 89.0) * 24634.6345);
+                            let hbz = fract(sin(fcx * 337.9 + fcy * 259.1 + fcz * 413.7 + 107.0) * 35311.3147);
+                            let jb = (vec3<f32>(hbx, hby, hbz) - vec3<f32>(0.5, 0.5, 0.5)) * 0.18;
+                            let pb = vec3<f32>(fcx + 0.5, fcy + 0.5, fcz + 0.5) + jb;
+                            let db = dot(p - pb, p - pb);
+                            if (db < d1) {
+                                d2 = d1;
+                                d1 = db;
+                            } else if (db < d2) {
+                                d2 = db;
+                            }
+                        }
+                    }
+                }
+
+                // Small near boundaries between neighboring Voronoi cells.
+                let gap = sqrt(max(0.0, d2)) - sqrt(max(0.0, d1));
+                let border = 1.0 - smoothstep(0.045, 0.14, gap);
+
+                var base_floor = 0.105;
+                base_floor = max(0.0, base_floor - border * 0.045);
+
+                // Layered intra-cell grime noise for a more natural surface.
+                let gx = floor(x * 12.0);
+                let gy = floor(y * 12.0);
+                let gw = floor(w * 12.0);
+                let nh1 = fract(sin(gx * 127.1 + gy * 311.7 + gw * 74.7) * 43758.5453);
+                let nh2 = fract(sin(gx * 269.5 + gy * 183.3 + gw * 246.1) * 24634.6345);
+                let noise_fine = (nh1 - 0.5) * 0.018 + (nh2 - 0.5) * 0.010;
+                let mott1 = sin(x * 0.47 + y * 0.39 + w * 0.41 + nh1 * 6.2831853);
+                let mott2 = sin(x * 0.93 - y * 0.58 + w * 0.77 + 1.3);
+                let noise_medium = mott1 * 0.010 + mott2 * 0.006;
+
+                // Faceted granular micro-noise with larger "pixels".
+                let grain_scale = 26.0;
+                let sx = floor(x * grain_scale);
+                let sy = floor(y * grain_scale);
+                let sw = floor(w * grain_scale);
+                let lx = fract(x * grain_scale) - 0.5;
+                let ly = fract(y * grain_scale) - 0.5;
+                let lw = fract(w * grain_scale) - 0.5;
+                let gh1 = fract(sin(sx * 157.3 + sy * 91.7 + sw * 211.1 + 5.0) * 43758.5453);
+                let gh2 = fract(sin(sx * 73.1 + sy * 263.9 + sw * 149.3 + 17.0) * 24634.6345);
+                let gh3 = fract(sin(sx * 311.7 + sy * 127.1 + sw * 59.3 + 31.0) * 35311.3147);
+                let gh4 = fract(sin(sx * 197.7 + sy * 389.1 + sw * 83.9 + 43.0) * 19341.1727);
+                let ghr = vec3<f32>(gh1 * 2.0 - 1.0, gh2 * 2.0 - 1.0, gh3 * 2.0 - 1.0);
+                let ghn = ghr / max(length(ghr), 1e-4);
+                // Piecewise planar shading inside each grain cell gives faceted look.
+                let facet_plane = dot(vec3<f32>(lx, ly, lw), ghn);
+                let facet_step = floor((facet_plane * 0.5 + 0.5) * 4.0) / 3.0;
+                let facet_noise = (facet_step - 0.5) * 0.070 + (gh4 - 0.5) * 0.010;
+                let facet_edges = smoothstep(0.31, 0.50, max(abs(lx), max(abs(ly), abs(lw)))) * 0.012;
+                let noise_grain = (gh1 - 0.5) * 0.010 + (gh2 - 0.5) * 0.008;
+                let dark_pits = smoothstep(0.84, 0.98, gh3) * 0.032 + smoothstep(0.93, 0.998, gh1) * 0.018;
+                let micro_cuts = smoothstep(0.92, 0.998, gh2) * 0.010;
+                let bright_specks = smoothstep(0.975, 0.999, gh4) * 0.004;
+
+                let floor_lit = clamp(
+                    base_floor + noise_fine + noise_medium + facet_noise + noise_grain - facet_edges - dark_pits - micro_cuts + bright_specks + 0.001,
+                    0.0,
+                    1.0
+                );
+
+                // Invisible random patches in world space. They only show up as
+                // blood when they overlap tile borders; closer to patch center = redder.
+                let patch_cell = 18.0;
+                let pcx0 = i32(floor(x / patch_cell));
+                let pcy0 = i32(floor(y / patch_cell));
+                let pcw0 = i32(floor(w / patch_cell));
+                var blood_patch = 0.0;
+                let world_p = vec3<f32>(x, y, w);
+                for (var pz = -1; pz <= 1; pz = pz + 1) {
+                    for (var py = -1; py <= 1; py = py + 1) {
+                        for (var px = -1; px <= 1; px = px + 1) {
+                            let ccx = pcx0 + px;
+                            let ccy = pcy0 + py;
+                            let ccw = pcw0 + pz;
+                            let fcx = f32(ccx);
+                            let fcy = f32(ccy);
+                            let fcw = f32(ccw);
+
+                            let ph1 = fract(sin(fcx * 91.7 + fcy * 217.3 + fcw * 157.9 + 11.0) * 43758.5453);
+                            let ph2 = fract(sin(fcx * 173.3 + fcy * 63.1 + fcw * 289.7 + 23.0) * 24634.6345);
+                            let ph3 = fract(sin(fcx * 257.9 + fcy * 311.7 + fcw * 79.3 + 37.0) * 35311.3147);
+                            let ph4 = fract(sin(fcx * 389.1 + fcy * 149.3 + fcw * 197.7 + 53.0) * 19341.1727);
+                            let center = vec3<f32>(
+                                (fcx + 0.15 + ph1 * 0.7) * patch_cell,
+                                (fcy + 0.15 + ph2 * 0.7) * patch_cell,
+                                (fcw + 0.15 + ph3 * 0.7) * patch_cell
+                            );
+                            let radius = patch_cell * (0.22 + ph4 * 0.22);
+                            let pd = distance(world_p, center);
+                            let pstrength = 1.0 - smoothstep(radius * 0.15, radius, pd);
+                            blood_patch = max(blood_patch, pstrength);
+                        }
+                    }
+                }
+
+                let blood_on_border = blood_patch * smoothstep(0.35, 0.95, border);
+                var floor_r = floor_lit;
+                var floor_g = floor_lit;
+                var floor_b = floor_lit;
+                if (blood_on_border > 0.001) {
+                    let blood_amt = clamp(blood_on_border, 0.0, 1.0);
+                    floor_r = mix(floor_r, 0.42, blood_amt);
+                    floor_g = mix(floor_g, 0.025, blood_amt * 0.92);
+                    floor_b = mix(floor_b, 0.02, blood_amt * 0.92);
+                }
+
+                best_voxel.r = floor_r;
+                best_voxel.g = floor_g;
+                best_voxel.b = floor_b;
+            }
+            best_voxel.a = 0.2;
+            best_voxel.s = t;
+        }
+    }
+    }
+`;
+
+// PoIs
+let poIs = {
+  roomCenters: [
+    {name: "Room 1", pos: r1c},
+    {name: "Room 2", pos: r2c},
+    {name: "Corridor 3", pos: c3c},
+    {name: "Room 3", pos: r3_entrance},
+    {name: "Corridor 6", pos: c6_c},
+    {name: "Room 4", pos: r4_entrance},
+    {name: "Corridor 7", pos: c7_c},
+    {name: "Room 5", pos: r5_entrance},
+    {name: "Room 6", pos: r6_entrance},
+  ],
+  shadeSpawns: [
+    c4c.add(new Vector4D(0, 0, 0, C4L/2.0)),
+    c5_monster1,
+    c5_monster2,
+    pill_ref,
+    pill_ref.add(new Vector4D(5, 0, 0, 5)),
+    pill_ref.add(new Vector4D(-5, 0, 0, 5)),
+    r4_entrance,
+    r4_spawn1,
+    r4_spawn2,
+  ],
+  crawlerSpawns: [
+    {
+      pos: c4c.add(new Vector4D(0, 0, _H, -C4L/2.0)),
+      volumeMin: c4c.add(new Vector4D(-c4r/2, -c4r/2, _H, -C4L/2.0)),
+      volumeMax: c4c.add(new Vector4D(c4r/2, c4r/2, _H, -C4L/2.0)),
+    },
+    {
+      pos: w5_c.add(new Vector4D(0, 0, _H, 0)),
+      volumeMin: new Vector4D(w5_c.x - R3XL / 2.0, w5_c.y - w5_yl / 2.0 + 1, _H, w5_c.w),
+      volumeMax: new Vector4D(w5_c.x + R3XL / 2.0, w5_c.y + w5_yl / 2.0 - 1, _H, w5_c.w),
+    },
+    {
+      pos: w4_c.add(new Vector4D(0, 0, _H, 0)),
+      volumeMin: new Vector4D(w4_c.x - R3XL / 2.0, w4_c.y, _H, w4_c.w),
+      volumeMax: new Vector4D(w4_c.x + R3XL / 2.0, w4_c.y, _H, w4_c.w + w4_wl / 2.0),
+    },
+
+  ],
+  ophaneSpawns: [
+    {
+      pos: r6_c.add(new Vector4D(0, 0, _H+8, 0)),
+      volumeCenter: r6_c,
+      volumeRadius: R6_BridgeShellR,
+    },
+  ],
+  room6Center: r6_c,
+  room6OuterRadius: R6_R,
+  room6InnerRadius: R6_BridgeShellR,
+  magicWallIndex: magicWallIndex,
+  bossEntranceWallIdx: bossEntranceWallIdx,
+  bargainerPos: new Vector4D(R2X - R2R + 1.7, 0, 1.0 + AREA1_ZH, 0),
+  bargainerIndex: bargainerIndex,
+  room2MagicWallCenter: r2_magicwall1_c,
+  room2MagicWallIdx: r2_magicwall1_idx,
+  tutorialZones: [
+    {
+      id: "room1_welcome",
+      aabbMin: new Vector4D(-R1HR + 1, -R1HR + 1, AREA1_ZH - 1, -R1HW/2 + 1),
+      aabbMax: new Vector4D(R1HR - 1, R1HR - 1, AREA1_ZH + _H + 1, R1HW/2 - 1),
+      requireBargain: false,
+      title: "HYPERHELL",
+      text: "This is a Demo of HYPERHELL,<br>the first 4D shooter of its kind.<br><br><u>Controls</u><br>Use WASD keys to move. Left-click + drag to look around (or J/L keys).",
+      video: "../icons/tutorial_1.mp4",
+      overlay: "../icons/tutorial_1_controls.png",
+    },
+    {
+      id: "room2_controls",
+      aabbMin: new Vector4D(R2X - R2R + 1, -R2R + 1, AREA1_ZH - 1, -R2R + 1),
+      aabbMax: new Vector4D(R2X + R2R - 1, R2R - 1, AREA1_ZH + 1, R2R - 1),
+      requireBargain: true,
+      title: "4D MOVEMENT",
+      text: "You wake up feeling... different.<br><br><u>Controls</u><br>You can now move in the 4th dimension.<br>Left click + drag up/down to rotate your view in 4D, and find an exit.",
+      video: "../icons/tutorial_2.mp4",
+      overlay: "../icons/tutorial_2.png",
+    },
+    {
+      id: "corridor3_shooting",
+      aabbMin: c3c.add(new Vector4D(-c3r/2, -c3r/2, -_H, -1)),
+      aabbMax: c3c.add(new Vector4D(c3r/2, c3r/2, _H, 1)),
+      requireBargain: false,
+      title: "COMBAT",
+      text: "Enemies can move in 4 dimensions,<br>but so can you.<br><br>Press Q/E to step sideways in the 4th dimension, and Space to shoot.",
+      // video: "../icons/tutorial_1.mp4", // TODO actual video
+      overlay: "../icons/tutorial_3.png",
+    },
+    {
+      id: "corridor4_unblink",
+      aabbMin: c4c.add(new Vector4D(-c4r/2, -c4r/2, -_H, -1 -4)),
+      aabbMax: c4c.add(new Vector4D(c4r/2, c4r/2, _H, 1 -4)),
+      requireBargain: false,
+      title: "UNBLINK",
+      text: "Open your Eye...<br><br>Press and hold R to Unblink,<br>allowing you to see more of the 4th dimension.<br>While unblinking, some enemies are easier to shoot.",
+      // video: "../icons/tutorial_1.mp4", // TODO actual video
+      overlay: "../icons/tutorial_4.png",
+    },
+    {
+      id: "corridor5_rotate",
+      aabbMin: c5c.add(new Vector4D(-C5A_R2/2, -C5A_L/2, -_H, -c5ar1/2)),
+      aabbMax: c5c.add(new Vector4D(C5A_R2/2, C5A_L/2, _H, c5ar1/2)),
+      requireBargain: false,
+      title: "ROTATE",
+      text: "Some disorientation is expected.<br><br>Hold right-click and drag left/right to get a better angle while in Unblink.",
+      video: "../icons/tutorial_5.mp4",
+      overlay: "../icons/tutorial_5.png",
+    },
+    {
+      id: "room5_lava",
+      aabbMin: r5_c.add(new Vector4D(-R5_DX/2, -R5_DY/2, -_H, -R5_WL/2)),
+      aabbMax: r5_c.add(new Vector4D(R5_DX/2, R5_DY/2, _H, R5_WL/2 - r5_shore_wl / 2.)),
+      requireBargain: false,
+      title: "LAVA",
+      text: "The careless burn to a crisp down here.<br><br>Stepping in lava can be fatal.<br>Lava is easier to see without Unblink.<br>Locate bridges to cross safely.",
+    },
+  ],
+  lavaRegions: [
+      { type: 'box', cx: r5_c.x, cy: r5_c.y, cw: r5_c.w, hx: R5_DX / 2.0 * 3, hy: R5_DY / 2.0 * 100, hw: R5_LAVA_WL / 2.0 },
+      { type: 'sphere', cx: r6_c.x, cy: r6_c.y, cw: r6_c.w, r: R6_LavaR },
+  ],
+  bridgeRegions: [
+      { type: 'box', cx: r5_bc.x, cy: r5_bc.y, cw: r5_bc.w, hx: R5_BX / 2.0, hy: R5_BY / 2.0, hw: R5_BWL / 2.0 },
+      { type: 'box', cx: r6_b1c.x, cy: r6_b1c.y, cw: r6_b1c.w, hx: r6_b1_lx / 2.0, hy: r6_b1_r, hw: r6_b1_r },
+      { type: 'box', cx: r6_b2c.x, cy: r6_b2c.y, cw: r6_b2c.w, hx: r6_b2_r, hy: r6_b2_ly / 2.0, hw: r6_b2_r },
+      { type: 'shell', cx: r6_c.x, cy: r6_c.y, cw: r6_c.w, innerR: R6_BridgeShellR * 0.8, outerR: R6_BridgeShellR * 1.1 },
+      { type: 'sphere', cx: r6_c.x, cy: r6_c.y, cw: r6_c.w, r: R6_PedestalR },
+  ],
+};
+
+
+const main_canvas = document.getElementById('canvas');
+let custom_scene = {
+    visibleHyperobjects: objects,
+    mainCanvas: main_canvas,
+    floor_heightmap: the_bargain_floor_heightmap,
+    floorShader: bargainFloorShader
+};
+
+// GameManager
+// Player controls, NPCs, Monsters, etc
+let gameManager = new TheBargainManager(custom_scene, poIs);
+custom_scene.gameManager = gameManager;
+
+
+runHyperengine(custom_scene).catch(err => {
+  console.error(err);
+  document.body.innerHTML += '<div style="color: red; padding: 20px;">Error: ' + err.message + '</div>';
+});
+</script>
+</body>
+</html>
